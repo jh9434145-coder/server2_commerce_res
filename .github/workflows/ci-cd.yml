@@ -30,7 +30,7 @@ jobs:
         with:
           host: 34.50.60.193
           username: oksm1003
-          key: ${{ secrets.GCP_SSH_S2_KEY }} # 이 이름이 GitHub Secrets와 일치해야 함
+          key: ${{ secrets.GCP_KEY }} # 이 이름이 GitHub Secrets와 일치해야 함
           script: |
             # 폴더 이동 (없으면 생성)
             mkdir -p /home/oksm1003/reservation

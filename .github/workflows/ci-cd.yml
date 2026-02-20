@@ -18,33 +18,48 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      # 1. 이미지 빌드 및 푸시
+      # 이미지 빌드 및 푸시
       - name: Build and Push Docker Image
         run: |
           docker build -t ${{ secrets.DOCKER_USERNAME }}/msa-reservation:latest .
           docker push ${{ secrets.DOCKER_USERNAME }}/msa-reservation:latest
 
-      # 2. GCP Server 2 배포
+      # GCP Server 2 배포 (시크릿 이름 GCP_KEY로 수정)
       - name: Deploy to GCP Server 2
         uses: appleboy/ssh-action@master
         with:
           host: 34.50.60.193
           username: oksm1003
-          key: ${{ secrets.GCP_KEY }} # 이 이름이 GitHub Secrets와 일치해야 함
+          key: ${{ secrets.GCP_KEY }}
           script: |
-            # 폴더 이동 (없으면 생성)
             mkdir -p /home/oksm1003/reservation
             cd /home/oksm1003/reservation
             
-            # .env 파일 생성 (Server 1 IP: 34.158.208.117 연결 설정 포함)
+            # 1. 환경 변수 파일 생성 (.env)
             echo "DOCKER_USERNAME=${{ secrets.DOCKER_USERNAME }}" > .env
             echo "DATABASE_URL=postgres://${{ secrets.DB_USER }}:${{ secrets.DB_PASSWORD }}@34.158.208.117:5432/msa_core_db" >> .env
             echo "RABBITMQ_URL=amqp://${{ secrets.RABBITMQ_USER }}:${{ secrets.RABBITMQ_PASSWORD }}@34.158.208.117:5672" >> .env
             echo "PORT=8082" >> .env
-            echo "TZ=Asia/Seoul" >> .env
             
-            # docker-compose.yml 파일이 서버에 없다면 여기서 생성하거나 git pull 처리
-            # docker compose 실행
+            # 2. docker-compose.yml 파일 생성
+            cat <<EOF > docker-compose.yml
+            services:
+              reservation:
+                image: ${{ secrets.DOCKER_USERNAME }}/msa-reservation:latest
+                container_name: reservation-service
+                restart: always
+                ports:
+                  - "8082:8082"
+                env_file: .env
+                networks:
+                  - msa-network
+
+            networks:
+              msa-network:
+                external: true
+            EOF
+            
+            # 3. 컨테이너 실행
             docker compose pull
             docker compose up -d
             docker image prune -f

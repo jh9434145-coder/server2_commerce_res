@@ -2,7 +2,10 @@
 require('dotenv').config();
 const express = require('express');
 const { Pool } = require('pg');
-const amqp = require('amqplib');
+
+/* [RabbitMQ 관련] amqplib 라이브러리 로드
+RabbitMQ 서버와 AMQP(Advanced Message Queuing Protocol) 방식으로 통신하기 위한 핵심 모듈*/
+// const amqp = require('amqplib');
 
 const app = express();
 const PORT = process.env.PORT || 8082;
@@ -11,8 +14,16 @@ const PORT = process.env.PORT || 8082;
 const dbUrl = process.env.DATABASE_URL || `postgres://${process.env.DB_USER}:${process.env.DB_PASSWORD}@34.158.208.117:5432/msa_core_db`;
 const pool = new Pool({ connectionString: dbUrl });
 
-let channel;
-async function connectMQ() {
+/* [RabbitMQ 관련] 채널 변수 선언
+ 실제 메시지를 주고받는 논리적인 통로(Channel)를 저장하는 변수*/
+// let channel;
+
+
+ /* [RabbitMQ 관련] 연결 및 채널 생성 함수
+1. process.env.RABBITMQ_URL에 설정된 주소로 연결 시도
+2. 연결 성공 시 메시지 전송을 위한 채널 생성
+3. 연결 실패 시 에러를 로그에 찍고 5초 뒤에 재연결을 시도함 (재귀 호출)*/
+/*async function connectMQ() {
   try {
     const conn = await amqp.connect(process.env.RABBITMQ_URL);
     channel = await conn.createChannel();
@@ -21,7 +32,7 @@ async function connectMQ() {
     console.error("❌ MQ 연결 실패 (5초 후 재시도):", err.message);
     setTimeout(connectMQ, 5000);
   }
-}
+}*/
 
 app.use(express.json());
 
@@ -56,5 +67,9 @@ app.get('/health', (req, res) => res.send('OK'));
 
 app.listen(PORT, () => {
   console.log(`🚀 Service running on port ${PORT}`);
-  connectMQ();
+
+/*[RabbitMQ 관련] 서비스 시작 시 연결 함수 호출
+서버가 구동되자마자 RabbitMQ 브로커와 연결을 맺기 위해 실행함
+현재 사용하지 않으므로 실행되지 않도록 주석 처리*/
+  // connectMQ();
 });

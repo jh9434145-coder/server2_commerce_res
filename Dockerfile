@@ -5,4 +5,5 @@ COPY package*.json ./
 RUN npm install --only=production
 COPY . .
 EXPOSE 8082
-CMD ["node", "app.js"]
+# 실행 경로를 src/app.js로 변경! [cite: 2026-02-23]
+CMD ["node", "src/app.js"]

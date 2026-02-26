@@ -1,74 +1,83 @@
 /**
  * FanVerse - Reservation Service Layer
- * 담당: 예약 비즈니스 로직 및 외부 마이크로서비스(Redis) 연동
+ * 수정 사항: Redis 기반 실시간 재고(event) 검증 및 차감 로직 추가
  */
 
 const resRepository = require('../repositories/resRepository');
-const { redisClient } = require('../../app'); // Server 2 메인 app에서 생성한 Redis 인스턴스
+const redis = require('../config/redisClient');
 
 /**
- * [핵심] 티켓 예매 실행 프로세스
- * @param {Object} resData - 클라이언트로부터 전달받은 예약 정보 (event_id, ticket_count)
- * @param {String} memberId - Nginx Gateway(Lua)에서 검증 후 헤더로 넘겨준 유저 식별자 (PK)
- * @returns {Object} DB 예약 결과와 Redis 유저 프로필이 결합된 객체
+ * [관리자용 또는 서버 시작용: Redis 재고 초기 세팅]
+ * 이 코드가 실행되어야 Redis에 'event' 메모리가 생성됨
  */
-exports.makeReservation = async (resData, memberId) => {
+exports.initEventStock = async (eventId, stockCount) => {
+    const key = `event:stock:${eventId}`;
+    await redis.set(key, stockCount);
+    // 핵심 주석: 초기 재고 데이터를 Redis에 세팅 (이벤트 시작 전 필수)
+    return { eventId, stockCount };
+};
+
+exports.validateAndPrepare = async (eventId, count, memberId) => {
+    // 1. Redis에서 실시간 재고 확인 및 선차감 (핵심!)
+    const stockKey = `event:stock:${eventId}`;
     
-    // 1. [외부 서비스 연동] Server 3 Redis에서 유저 세션/프로필 정보 조회
-    // MSA 환경에서 Core DB를 직접 조인하지 않고, 캐시 저장소를 공유하여 성능 최적화
-    let userProfile = null;
-    try {
-        // Nginx Lua 스크립트가 로그인 시 저장한 키 형식(user:ID)과 매칭
-        // 예: memberId가 1이면 'user:1' 조회 -> 결과: { nickname: '화니', email: '...' }
-        const cachedData = await redisClient.get(`user:${memberId}`);
-        
-        if (cachedData) {
-            userProfile = JSON.parse(cachedData);
-            console.log(`[Cache Hit] User ${memberId} 프로필 획득 성공`);
-        } else {
-            // Redis에 정보가 없더라도 예약은 진행될 수 있도록 예외처리(Soft-fail)
-            console.warn(`[Cache Miss] 유저 ID ${memberId}에 대한 세션 캐시가 존재하지 않음`);
-        }
-    } catch (err) {
-        // 인프라 장애(Redis Down) 발생 시 로깅 후 다음 단계로 진행 (서비스 가용성 확보)
-        console.error("❌ Redis Connection Error (Server 3):", err.message);
+    // DECRBY를 사용하여 요청 수량만큼 즉시 차감
+    const remainingStock = await redis.decrby(stockKey, count);
+
+    // 재고가 부족하면 즉시 예외 발생 (DB까지 안 가고 여기서 컷)
+    if (remainingStock < 0) {
+        // 깎았던 수량 다시 복구 (Rollback)
+        await redis.incrby(stockKey, count);
+        throw { status: 400, message: "선착순 마감되었습니다. 재고가 부족합니다." };
     }
 
-    // 2. [데이터 전처리] DB 입력을 위한 파라미터 정제
-    const dbData = {
-        event_id: parseInt(resData.event_id, 10),
-        ticket_count: parseInt(resData.ticket_count, 10),
-        member_id: memberId // PostgreSQL BIGINT로 들어갈 원본 ID (1, 2 등)
-    };
+    // 2. 유저 포인트 정보 조회 (Server 3 Redis 활용)
+    const cachedUser = await redis.get(`user:${memberId}`);
+    const userProfile = cachedUser ? JSON.parse(cachedUser) : null;
 
-    // 3. [DB 트랜잭션] Repository 계층을 통한 물리적 저장 수행
-    // 좌석 조회 -> 차감 -> 예약 생성이 원자적(Atomic)으로 처리됨 (선착순 이슈 방지)
-    const dbResult = await resRepository.createReservationWithTransaction(dbData);
+    // 3. 이벤트 상세 정보 조회 (금액 계산용)
+    const event = await resRepository.findEventById(eventId);
+    if (!event) {
+        // 이벤트가 없으면 깎았던 재고 복구
+        await redis.incrby(stockKey, count);
+        throw { status: 404, message: "공연 정보를 찾을 수 없습니다." };
+    }
 
-    // 4. [데이터 포맷팅] JavaScript의 BigInt 직렬화 이슈 해결
-    // PostgreSQL의 BIGINT는 JSON으로 변환 시 에러가 나므로 문자열(String)로 캐스팅
-    const cleanDbResult = JSON.parse(JSON.stringify(dbResult, (key, value) => 
-        typeof value === 'bigint' ? value.toString() : value
-    ));
+    const totalPrice = (event.price * count) + (count * 1000);
 
-    // 5. [결과 병합] 예약 정보와 유저 정보를 통합하여 컨트롤러에 반환
+    // 4. 포인트 잔액 검증
+    if (userProfile && userProfile.points < totalPrice) {
+        // 포인트 부족 시 깎았던 재고 복구
+        await redis.incrby(stockKey, count);
+        throw { status: 400, message: "포인트가 부족합니다." };
+    }
+
+    const ticketCode = `TKT-${Math.floor(Math.random() * 90000) + 10000}`;
+
     return {
-        ...cleanDbResult,
-        // Redis에서 가져온 '화니' 혹은 '쩡'의 닉네임을 응답에 포함
-        booker_name: userProfile ? userProfile.nickname : "미인증 사용자",
-        user_meta: userProfile || { status: "Guest" }
+        totalPrice,
+        ticketCode,
+        eventTitle: event.title,
+        remainingStock // 현재 남은 재고 반환 가능
     };
 };
 
 /**
- * [공연 목록 조회 서비스]
+ * [티켓 예매 실행]
  */
-exports.findAllEvents = async () => {
-    // Repository에서 모든 공연 정보를 가져옴
-    const events = await resRepository.findAllEvents();
-    
-    // 리스트 내 BigInt 필드 조작 방지를 위한 안정적 직렬화 처리
-    return JSON.parse(JSON.stringify(events, (key, value) => 
+exports.makeReservation = async (resData, memberId) => {
+    const dbData = {
+        event_id: parseInt(resData.event_id, 10),
+        ticket_count: parseInt(resData.ticket_count, 10),
+        member_id: memberId,
+        total_price: resData.total_price,
+        ticket_code: resData.ticket_code
+    };
+
+    // DB 저장 (이미 Redis에서 재고 검증이 끝났으므로 안전하게 입력)
+    const dbResult = await resRepository.createReservationWithTransaction(dbData);
+
+    return JSON.parse(JSON.stringify(dbResult, (key, value) => 
         typeof value === 'bigint' ? value.toString() : value
     ));
 };

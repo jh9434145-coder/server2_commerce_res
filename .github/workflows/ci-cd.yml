@@ -3,6 +3,10 @@ name: Reservation Service CI/CD
 on:
   push:
     branches: [ master ]
+<<<<<<< Updated upstream
+=======
+
+>>>>>>> Stashed changes
 
 
 jobs:

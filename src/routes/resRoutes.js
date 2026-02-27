@@ -21,4 +21,17 @@ router.get('/reserve/status/:userId', resController.getReservationStatus);
 // [GET] 특정 유저의 예약 상태 확인 (선택 사항)
 router.get('/test', testController.handleTestRequest);
 
+
+// [POST] 모든 이벤트 재고 Redis 동기화 (관리자용 Warm-up)
+// 서버 재시작 없이 DB -> Redis 강제 동기화가 필요할 때 호출
+router.post('/admin/warmup', async (req, res) => {
+    try {
+        const resService = require('../services/resService');
+        await resService.warmupAllEventsToRedis();
+        res.status(200).json({ message: "모든 이벤트 재고가 Redis에 성공적으로 로드되었습니다." });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 module.exports = router;

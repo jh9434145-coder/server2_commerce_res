@@ -51,6 +51,13 @@ app.use((err, req, res, next) => {
 const resRepository = require('./repositories/resRepository'); // Repository 불러오기
 const resService = require('./services/resService'); // Service 불러오기
 
+// 👇 핵심 주석: Node.js 서버가 켜질 때 RabbitMQ Consumer(직원)도 자동으로 백그라운드에서 실행됨
+require('./messaging/listener/consumer');
+
+// 👇 [추가] 핵심 주석: 결제 실패 시 보상 트랜잭션을 처리할 취소 전담 Consumer 실행
+// (주의: cancelConsumer.js 파일이 있는 실제 경로에 맞게 맞춰줘!)
+const startCancelConsumer = require('./messaging/listener/cancelConsumer');
+startCancelConsumer().catch(err => console.error("❌ [Cancel Consumer Error] 실행 실패:", err));
 
 app.listen(PORT, async () => {
     console.log(`🚀 [Reservation] Service is running on port ${PORT}`);
@@ -58,22 +65,15 @@ app.listen(PORT, async () => {
     try {
         /**
          * [핵심: Redis 재고 Warm-up]
-         * 서버가 시작될 때 DB에서 실제 잔여석을 조회하여 Redis에 동기화함.
-         * 서비스 단독 운영을 위해 직접 DB(PostgreSQL) 값을 참조함.
+         * 하드코딩된 ID 대신, DB의 모든 이벤트를 조회하여 Redis에 동기화함.
          */
-        const targetEventId = 1; // 우선 테스트용 ID (실제로는 활성 이벤트 리스트를 돌리는게 좋음)
+        await resService.warmupAllEventsToRedis();
         
-        // 1. DB에서 실제 재고 조회 (방금 만든 repository 함수 사용)
-        const dbStock = await resRepository.getEventStock(targetEventId);
-        
-        // 2. Redis에 재고 데이터 세팅 (방금 만든 service 함수 사용)
-        await resService.initEventStock(targetEventId, dbStock);
-
-        console.log(`✅ [Warm-up] 이벤트 ${targetEventId} 재고(${dbStock}개) Redis 로드 완료`);
+        console.log(`✅ [Warm-up] 모든 이벤트 재고 Redis 동기화 완료`);
     } catch (err) {
         console.error("❌ [Warm-up Error] 초기 재고 로드 실패:", err.message);
     }
 });
 
-// 테스트 환경 등을 위해 app 객체만 내보냄 (redisClient는 내보낼 필요 없음)
-// module.exports = app;
+
+

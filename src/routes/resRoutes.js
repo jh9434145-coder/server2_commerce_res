@@ -21,6 +21,8 @@ router.get('/reserve/status/:userId', resController.getReservationStatus);
 // [GET] 특정 유저의 예약 상태 확인 (선택 사항)
 router.get('/test', testController.handleTestRequest);
 
+// [POST] 사용자 직접 환불 요청
+router.post('/refund', resController.requestRefund);
 
 // [POST] 모든 이벤트 재고 Redis 동기화 (관리자용 Warm-up)
 // 서버 재시작 없이 DB -> Redis 강제 동기화가 필요할 때 호출
@@ -33,5 +35,7 @@ router.post('/admin/warmup', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
+
 
 module.exports = router;

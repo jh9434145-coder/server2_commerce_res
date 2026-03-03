@@ -1,3 +1,5 @@
+// src/controller/resController.js
+
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 const resService = require('../services/resService');
@@ -32,17 +34,37 @@ exports.createReservation = async (req, res) => {
 
     // [1] 요청 본문(Body)에서 예약에 필요한 핵심 정보 추출
     const { event_id, ticket_count, member_id } = req.body;
-    // 디버깅용: 전달받은 이벤트 ID와 티켓 수량 확인
+
     console.log("이벤트아이디"+event_id+", 티켓카운트"+ticket_count)
     // [2] 안전한 계산을 위해 티켓 수량을 10진수 정수로 명시적 형변환
     const count = parseInt(ticket_count, 10); // 숫자로 확실히 변환
 
    try {
-        /**
-         * [Step 1: Redis 재고 선점]
-         * DB를 찌르기 전, Redis에서 원자적(Atomic) 연산인 DECRBY를 사용해 
-         * 찰나의 순간에 몰리는 수만 명의 요청 중 선착순으로 재고를 차감함.
-         */
+        // 2. 토큰으로 Redis 조회해서 member_id 직접 찾기
+        const clientToken = req.headers.authorization?.split(' ')[1];
+
+        // const userData = await redis.get(`user:session:${token}`); 
+       if (!clientToken) return res.status(401).json({ message: "토큰이 없습니다." });
+        
+        // 2. Redis에서 해당 유저의 정보(토큰 포함) 가져오기
+        // (Hash 구조에 맞는 명령어 사용)
+        const redisData = await redis.hGetAll(`AUTH:MEMBER:${member_id}`);
+        
+        if (!redisData || Object.keys(redisData).length === 0) {
+            return res.status(401).json({ message: "존재하지 않는 유저 세션입니다." });
+        }
+
+        const serverData = redisData;
+        
+        // 3. Redis에 저장된 토큰과 클라이언트가 보낸 토큰 비교
+
+        if (serverData.token !== clientToken) {
+            console.log("❌ 토큰 불일치!");
+            return res.status(401).json({ message: "유효하지 않은 토큰입니다." });
+        }
+
+        console.log(`✅ 인증 성공: 유저 ${member_id}`);
+        // 4. 나머지 로직 (재고 차감 등)은 그대로 유지
         const remainingStock = await redis.decrBy(`event:stock:${event_id}`, ticket_count);
 
         if (remainingStock < 0) {
@@ -138,5 +160,35 @@ exports.getReservationStatus = async (req, res) => {
         res.json({ message: "조회 기능 준비 중", userId });
     } catch (error) {
         res.status(500).json({ message: "상태 조회 중 오류 발생" });
+    }
+};
+
+// 환불 요청 접수
+exports.requestRefund = async (req, res) => {
+    const { ticket_code, member_id } = req.body; // 누구의 어떤 티켓인지 확인
+
+    try {
+        // 1. 예약 정보 확인 (본인 확인 및 취소 가능 상태인지 체크)
+        const reservation = await resRepository.findReservationByCode(ticket_code);
+        
+        // [수정 포인트] reservation.member_id와 비교할 때 타입을 맞춤
+        // DB의 member_id와 요청의 member_id를 둘 다 숫자로 변환해서 비교!
+        if (!reservation || Number(reservation.member_id) !== Number(member_id)) {
+            console.log(`❌ 불일치 발생: DB(${reservation?.member_id}) vs 요청(${member_id})`);
+            return res.status(404).json({ message: "예약 정보를 찾을 수 없습니다." });
+        }
+        
+        if (reservation.status === 'CANCELED') {
+            return res.status(400).json({ message: "이미 취소된 티켓입니다." });
+        }
+
+        // 2. 환불 서비스 호출
+        // (내부적으로 포인트 복구 요청 메시지를 Spring으로 던지거나 DB 처리를 함)
+        await resService.processRefund(reservation);
+
+        res.status(200).json({ message: "환불 요청이 성공적으로 처리되었습니다." });
+    } catch (error) {
+        console.error("환불 처리 중 오류:", error);
+        res.status(500).json({ message: "환불 처리 중 오류가 발생했습니다." });
     }
 };

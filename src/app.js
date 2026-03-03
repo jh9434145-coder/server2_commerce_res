@@ -1,3 +1,5 @@
+// src/app.js
+
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -58,6 +60,10 @@ require('./messaging/listener/consumer');
 // (주의: cancelConsumer.js 파일이 있는 실제 경로에 맞게 맞춰줘!)
 const startCancelConsumer = require('./messaging/listener/cancelConsumer');
 startCancelConsumer().catch(err => console.error("❌ [Cancel Consumer Error] 실행 실패:", err));
+
+// 👇 [추가] 결제 상태 업데이트(응답 수신) Consumer 실행
+const startStatusUpdateConsumer = require('./messaging/listener/statusUpdateConsumer'); // [추가]
+startStatusUpdateConsumer().catch(err => console.error("❌ [Status Update Consumer Error] 실행 실패:", err)); // [추가]
 
 app.listen(PORT, async () => {
     console.log(`🚀 [Reservation] Service is running on port ${PORT}`);

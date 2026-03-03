@@ -1,3 +1,4 @@
+// src/services/resService.js
 /**
  * FanVerse - Reservation Service Layer
  * 수정 사항: Redis 기반 실시간 재고(event) 검증 및 차감 로직 추가
@@ -5,7 +6,7 @@
 
 const resRepository = require('../repositories/resRepository');
 const redis = require('../config/redisClient');
-
+const amqp = require('amqplib');
 /**
  * [핵심: 모든 이벤트 재고 Redis Warm-up]
  * DB의 모든 이벤트를 가져와서 Redis에 저장 (서버 시작 시 호출)
@@ -38,39 +39,39 @@ exports.initEventStock = async (eventId, stockCount) => {
     return { eventId, stockCount };
 };
 
+// src/services/resService.js
+
 exports.validateAndPrepare = async (eventId, count, memberId) => {
-    // 1. Redis에서 실시간 재고 확인 및 선차감 (핵심!)
     const stockKey = `event:stock:${eventId}`;
     
-    // DECRBY를 사용하여 요청 수량만큼 즉시 차감
-    const remainingStock = await redis.decrBy(stockKey, count);
+    // 1. Redis에서 유저 정보(Hash) 가져오기
+    const userKey = `AUTH:MEMBER:${memberId}`;
+    const userProfile = await redis.hGetAll(userKey);
 
-    // 재고가 부족하면 즉시 예외 발생 (DB까지 안 가고 여기서 컷)
-    if (remainingStock < 0) {
-        // 깎았던 수량 다시 복구 (Rollback)
-        await redis.incrBy(stockKey, count);
-        throw { status: 400, message: "선착순 마감되었습니다. 재고가 부족합니다." };
+    if (!userProfile || Object.keys(userProfile).length === 0) {
+        throw { status: 401, message: "유저 정보를 찾을 수 없습니다." };
     }
 
-    // 2. 유저 포인트 정보 조회 (Server 3 Redis 활용)
-    const cachedUser = await redis.get(`user:${memberId}`);
-    const userProfile = cachedUser ? JSON.parse(cachedUser) : null;
+    // [핵심 수정] 문자열인 balance를 숫자로 확실하게 변환
+    const userBalance = parseInt(userProfile.balance, 10) || 0; 
+    console.log(`💰 디버깅 - 보유 잔액: ${userBalance}, 필요 포인트 계산 시작`);
 
-    // 3. 이벤트 상세 정보 조회 (금액 계산용)
+    // 2. 이벤트 정보 조회 및 가격 계산
     const event = await resRepository.findEventById(eventId);
     if (!event) {
-        // 이벤트가 없으면 깎았던 재고 복구
-        await redis.incrBy(stockKey, count);
         throw { status: 404, message: "공연 정보를 찾을 수 없습니다." };
     }
 
+    // 총 가격 = (티켓 가격 * 수량) + (수수료 1000원 * 수량)
     const totalPrice = (event.price * count) + (count * 1000);
 
-    // 4. 포인트 잔액 검증
-    if (userProfile && userProfile.points < totalPrice) {
-        // 포인트 부족 시 깎았던 재고 복구
-        await redis.incrBy(stockKey, count);
-        throw { status: 400, message: "포인트가 부족합니다." };
+    // 3. 포인트 잔액 검증
+    if (userBalance < totalPrice) {
+        // 에러 메시지에 보유 포인트가 0으로 나오지 않게 userBalance를 정확히 전달
+        throw { 
+            status: 400, 
+            message: `포인트가 부족합니다. (필요: ${totalPrice}P / 보유: ${userBalance}P)` 
+        };
     }
 
     const ticketCode = `TKT-${Math.floor(Math.random() * 90000) + 10000}`;
@@ -78,10 +79,75 @@ exports.validateAndPrepare = async (eventId, count, memberId) => {
     return {
         totalPrice,
         ticketCode,
-        eventTitle: event.title,
-        remainingStock // 현재 남은 재고 반환 가능
+        eventTitle: event.title
     };
 };
+
+// exports.validateAndPrepare = async (eventId, count, memberId) => {
+//     // 1. Redis에서 실시간 재고 확인 및 선차감
+//     const stockKey = `event:stock:${eventId}`;
+//     const remainingStock = await redis.decrBy(stockKey, count);
+
+//     // 재고 부족 시 롤백 및 차단
+//     if (remainingStock < 0) {
+//         await redis.incrBy(stockKey, count);
+//         throw { status: 400, message: "선착순 마감되었습니다. 재고가 부족합니다." };
+//     }
+
+//     try {
+//         /* [수정 포인트]
+//         * 이미지의 Key 구조: AUTH:MEMBER:${memberId}
+//         * 데이터 타입: Hash*/
+//         const userKey = `AUTH:MEMBER:${memberId}`;
+//         const userProfile = await redis.hGetAll(userKey); // Hash 데이터를 객체로 가져옴
+        
+//         if (!userProfile || Object.keys(userProfile).length === 0) {
+//             // 유저 정보가 Redis에 없으면 재고 복구 후 에러 반환
+//             await redis.incrBy(stockKey, count);
+//             throw { status: 404, message: "유저 포인트 정보를 찾을 수 없습니다. 다시 로그인해주세요." };
+//         }
+
+//        // 이미지에서 'balance' 필드명을 사용하므로 이를 숫자로 변환
+//         const userBalance = parseInt(userProfile.balance, 10);
+//         // 데이터 전체와 포인트 잔액을 각각 확인
+//         console.log("👤 가져온 유저 정보:", userProfile);
+//         console.log("💰 현재 잔액(balance):", userProfile.balance);
+
+//         // 3. 이벤트 상세 정보 조회 (금액 계산용)
+//         const event = await resRepository.findEventById(eventId);
+//         if (!event) {
+//             await redis.incrBy(stockKey, count);
+//             throw { status: 404, message: "공연 정보를 찾을 수 없습니다." };
+//         }
+
+//         // 수수료 포함 총 금액 계산 (티켓당 1,000원 추가)
+//         const totalPrice = (event.price * count) + (count * 1000);
+
+//         // 4. [핵심] 포인트 잔액 검증
+//         // userProfile 객체 안에 points 필드가 숫자로 들어있어야 함
+//         if (!userProfile.points || userProfile.points < totalPrice) {
+//             await redis.incrBy(stockKey, count);
+//             throw { status: 400, message: `포인트가 부족합니다. (필요: ${totalPrice}P / 보유: ${userProfile.points || 0}P)` };
+//         }
+
+//         // 5. 티켓 코드 생성 (TKT-XXXXX)
+//         const ticketCode = `TKT-${Math.floor(Math.random() * 90000) + 10000}`;
+
+//         return {
+//             totalPrice,
+//             ticketCode,
+//             eventTitle: event.title,
+//             remainingStock
+//         };
+
+//     } catch (err) {
+//         // 내부 로직 중 에러 발생 시 차감했던 재고 반드시 복구
+//         if (err.status !== 400 && err.status !== 404) {
+//             await redis.incrBy(stockKey, count);
+//         }
+//         throw err;
+//     }
+// };
 
 /**
  * [티켓 예매 실행]
@@ -105,3 +171,53 @@ exports.makeReservation = async (resData, memberId) => {
     ));
 };
 
+// [사용자 환불 처리 및 결제 서버 통보]
+exports.processRefund = async (reservation) => {
+    const { ticket_code, event_id, ticket_count, total_price, member_id } = reservation;
+
+    try {
+        // 1. DB 상태 변경 및 재고 원복
+        await resRepository.cancelReservationAndRestoreStock(ticket_code, event_id, ticket_count);
+
+        // 2. Redis 실시간 재고 원복
+        const stockKey = `event:stock:${event_id}`;
+        await redis.incrBy(stockKey, ticket_count);
+
+        // 3. RabbitMQ를 통한 결제 서버(Spring)에 환불 요청 전송
+        const mqUser = process.env.RABBITMQ_USER || 'guest';
+        const mqPass = process.env.RABBITMQ_PASSWORD || 'guest';
+        const mqHost = process.env.RABBITMQ_HOST || 'localhost';
+        const rabbitUrl = `amqp://${mqUser}:${mqPass}@${mqHost}:5672`;
+
+        const connection = await amqp.connect(rabbitUrl);
+        const channel = await connection.createChannel();
+
+        const EXCHANGE_NAME = "msa.direct.exchange";
+        const REFUND_ROUTING_KEY = "pay.refund.request"; 
+
+        const refundData = {
+            orderId: ticket_code,
+            // [수정] BigInt 값을 문자열로 변환 (.toString() 추가)
+            memberId: member_id.toString(), 
+            amount: total_price.toString(),
+            type: "REFUND"
+        };
+
+        // 핵심 주석: BigInt 직렬화 에러 방지를 위해 문자열로 변환하여 발행
+        channel.publish(
+            EXCHANGE_NAME,
+            REFUND_ROUTING_KEY,
+            Buffer.from(JSON.stringify(refundData)),
+            { persistent: true }
+        );
+
+        console.log(`✅ [환불 메시지 전송] 티켓: ${ticket_code}`);
+        
+        // 안전하게 연결 종료
+        setTimeout(() => connection.close(), 500);
+
+    } catch (error) {
+        console.error("❌ 환불 처리 중 서비스 오류:", error.message);
+        throw error;
+    }
+};

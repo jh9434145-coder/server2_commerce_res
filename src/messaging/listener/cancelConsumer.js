@@ -1,3 +1,5 @@
+//src/messaging/listener/cencelConsumer.js
+
 const amqp = require('amqplib');
 const cancelService = require('../../services/cancelService');// 실제 로직은 여기서 처리
 

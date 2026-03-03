@@ -1,3 +1,5 @@
+// src/repositories/resRepository.js
+
 /**
  * FanVerse - Reservation Repository Layer
  * 담당: Prisma를 이용한 PostgreSQL(Server 1) 데이터 제어
@@ -125,7 +127,7 @@ exports.cancelReservationAndRestoreStock = async (ticket_code, event_id, ticket_
         });
 
         // 예약이 없거나 이미 취소된 경우, 재고를 복구하면 안 됨
-        if (!reservation || reservation.status === 'CANCELED') {
+        if (!reservation || reservation.status === 'CANCELLED') {
             console.log(`⚠️ [Skip] 이미 취소되었거나 없는 예약입니다: ${ticket_code}`);
             return null; 
         }
@@ -133,7 +135,7 @@ exports.cancelReservationAndRestoreStock = async (ticket_code, event_id, ticket_
         // 2. 예약 상태 변경
         const updatedRes = await tx.reservations.update({
             where: { ticket_code: ticket_code },
-            data: { status: 'CANCELED' }
+            data: { status: 'REFUNDED' }
         });
 
         // 3. DB 재고 원복
@@ -143,6 +145,36 @@ exports.cancelReservationAndRestoreStock = async (ticket_code, event_id, ticket_
         });
 
         // 핵심 주석: 상태 체크 후 취소 처리함으로써 재고 중복 복구 방지
+        return updatedRes;
+    });
+};
+
+// 1. [조회] 티켓 존재 여부 및 정보 확인 (수민이가 짠 코드)
+exports.findReservationByCode = async (ticket_code) => {
+    return await prisma.reservations.findUnique({
+        where: { ticket_code: ticket_code }
+    });
+};
+
+// 2. [수정] 환불 확정 및 좌석 복구 (트랜잭션)
+exports.completeRefund = async (ticket_code, event_id, ticket_count) => {
+    return await prisma.$transaction(async (tx) => {
+        // [Step 1] 예약 상태 변경 (CONFIRMED -> REFUNDED 또는 CANCELED)
+        const updatedRes = await tx.reservations.update({
+            where: { ticket_code: ticket_code },
+            data: { status: 'REFUNDED' } // 상태를 환불완료로 변경
+        });
+
+        // [Step 2] DB 좌석 수 복구 (+ 수량만큼 늘려줌)
+        await tx.events.update({
+            where: { event_id: event_id },
+            data: { 
+                available_seats: { 
+                    increment: ticket_count 
+                } 
+            }
+        });
+
         return updatedRes;
     });
 };

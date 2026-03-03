@@ -3,12 +3,6 @@ name: Reservation Service CI/CD
 on:
   push:
     branches: [ master ]
-<<<<<<< Updated upstream
-=======
-
->>>>>>> Stashed changes
-
-
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest

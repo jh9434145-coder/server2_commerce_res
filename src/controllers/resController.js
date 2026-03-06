@@ -16,12 +16,11 @@ exports.createReservation = async (req, res) => {
     if (!clientToken) return res.status(401).json({ message: "토큰이 없습니다." });
 
     try {
-        /* (필요시 토큰 검증 로직 주석 해제)
+        //(필요시 토큰 검증 로직 주석 해제)
         const redisData = await redis.hGetAll(`AUTH:MEMBER:${member_id}`);
         if (!redisData || Object.keys(redisData).length === 0 || redisData.token !== clientToken) {
             return res.status(401).json({ message: "유효하지 않은 토큰입니다." });
         }
-        */
 
         // [1] 서비스 계층 호출 (재고 차감, 데이터 검증)
         const bookingDetail = await resService.validateAndPrepare(event_id, count, member_id);

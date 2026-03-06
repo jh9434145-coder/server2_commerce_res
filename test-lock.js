@@ -5,8 +5,9 @@ async function heavyTest() {
     const url = 'http://localhost:8082/reserve';
     const count = 20; 
     
-    // 💡 토큰 앞에 'Bearer '가 중복으로 들어가지 않았는지, 따옴표 안에 공백은 없는지 확인!
-    const rawToken = 'eyJhbGciOiJIUzM4NCJ9.eyJzdWIiOiIxNiIsInJvbGUiOiJVU0VSIiwiaWF0IjoxNzcyNzc1MDQwLCJleHAiOjE3NzI3Nzg2NDB9.jfktGOFoAScWNk6qwlLrMOae9sAMjivYnt6BkRaSfTDX6jMligxRLkJag315nqic'; 
+    // 💡 토큰 앞에 'Bearer '가 중복으로 들어가지 않았는지, 따옴표 안에 공백은 없는지 확인!  
+    //node test-lock.js
+    const rawToken = 'eyJhbGciOiJIUzM4NCJ9.eyJzdWIiOiIxNiIsInJvbGUiOiJVU0VSIiwiaWF0IjoxNzcyNzc5NjYwLCJleHAiOjE3NzI3ODMyNjB9.ijPkQFOyqLQLCaTYzdVHDNt7yfTH1SkRxAP-8yi3ATEGsp94lfQp-e4ZyfSpUG5eyJhbGciOiJIUzM4NCJ9.eyJzdWIiOiIxNiIsInJvbGUiOiJVU0VSIiwiaWF0IjoxNzcyNzc5NzM5LCJleHAiOjE3NzI3ODMzMzl9.8cTXGhRVGW2wXvCxtZOtrmyjDlgtfIwkcqwIzBJt5kmcaHaJKPJdGLesp3RGJvVj'; 
     const token = rawToken.trim(); 
 
     console.log(`🔥 [동시성 테스트] ${count}개의 예약을 시도합니다!`);

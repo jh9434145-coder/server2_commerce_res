@@ -44,6 +44,7 @@ async function startConsumer() {
             // [데이터 수신] 메시지가 비어있으면 즉시 리턴함
             if (!msg) return;
             // [역직렬화] 버퍼 형태의 데이터를 JSON 객체로 파싱하여 예약 정보를 읽음
+            // msg.content는 바이너리(Buffer)이므로 문자열로 변환 후 JSON 파싱
             const data = JSON.parse(msg.content.toString());
             
             try {
@@ -80,6 +81,7 @@ async function startConsumer() {
                 );
 
                 // [수신 확인] 메시지를 정상 처리했음을 브로커에 알리고 큐에서 삭제함
+                //**ack는 성공(삭제 요청), nack은 실패(폐기 또는 재처리 요청)**
                 channel.ack(msg);
             } catch (err) {
                 console.error("❌ 예약 처리 에러:", err.message);

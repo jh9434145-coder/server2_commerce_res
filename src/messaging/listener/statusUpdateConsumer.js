@@ -21,6 +21,7 @@ async function startStatusUpdateConsumer() {
         const channel = await connection.createChannel();
 
         // [큐 및 바인딩 선언] 상태 업데이트 전용 큐를 생성하고, 익스체인지와 라우팅 키를 연결하여 메시지 경로를 확정함
+        //컨슈머는 assertQueue로 큐를 준비한 뒤 bindQueue로 둘을 연결해서 메시지를 받아 가는 흐름
         await channel.assertQueue(QUEUES.STATUS_UPDATE, { durable: true });
         await channel.bindQueue(QUEUES.STATUS_UPDATE, EXCHANGE, ROUTING_KEYS.STATUS_UPDATE);
 

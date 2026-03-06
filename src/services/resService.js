@@ -1,6 +1,7 @@
 // src/services/resService.js
 require('dotenv').config();
 const resRepository = require('../repositories/resRepository');
+const eventRepository = require('../repositories/eventRepository');
 const redis = require('../config/redisClient');
 
 /**
@@ -31,7 +32,7 @@ exports.validateAndPrepare = async (eventId, count, memberId) => {
         const userBalance = parseInt(userProfile.balance, 10) || 0; 
 
         // [3] 이벤트 가격 조회 및 총 금액 계산 (수수료 1000원 포함)
-        const event = await resRepository.findEventById(eventId);
+        const event = await eventRepository.findEventById(eventId);
         if (!event) throw { status: 404, message: "공연 정보를 찾을 수 없습니다." };
 
         const totalPrice = (event.price * count) + (count * 1000);

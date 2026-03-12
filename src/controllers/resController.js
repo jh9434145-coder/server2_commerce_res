@@ -49,18 +49,16 @@ exports.createReservation = async (req, res) => {
          * 이를 통해 예약 서버는 결제가 끝날 때까지 기다리지 않고 다음 사용자의 요청을 바로 받을 수 있음.
          */
         const messagePayload = {
-            orderId: bookingDetail.ticketCode, // 추적을 위한 고유 주문 번호
-            memberId: Number(member_id),       // 회원 식별자
-            amount: Number(bookingDetail.totalPrice), // 실제 결제 요청 금액 (예매수수료 포함 총액)
-            
-            // 🌟 [핵심 변경 사항] 지갑 서버 정산을 위한 순수 원가와 아티스트 수수료율 전송
-            originalAmount: Number(bookingDetail.ticketPrice), // 순수 티켓 1장의 가격 (events 테이블의 price)
-            fee: Number(bookingDetail.salesCommissionRate),    // 아티스트에게 부과할 판매 수수료율 정수값 (예: 5, 8, 12)
-            
-            quantity: count,                             // 티켓 수량
-            type: "PAYMENT",                             // 결제 타입 명시
-            eventTitle: bookingDetail.eventTitle,        // 사용자 알림용 공연 제목
-            replyRoutingKey: ROUTING_KEYS.STATUS_UPDATE  // 결제 완료 후 결과를 돌려받을 통로 지정
+            orderId: bookingDetail.ticketCode,         // 🌟 bookingDetail로 수정 완료
+            memberId: Number(member_id),
+            amount: Number(bookingDetail.totalPrice),
+            artistId: bookingDetail.artistId ? Number(bookingDetail.artistId) : null,
+            originalPrice: Number(bookingDetail.ticketPrice), 
+            fee: Number(bookingDetail.salesCommissionRate),
+            quantity: Number(bookingDetail.quantity),  // 🌟 서비스 규격(quantity)에 맞춤
+            type: "PAYMENT",
+            eventTitle: bookingDetail.eventTitle,
+            replyRoutingKey: ROUTING_KEYS.STATUS_UPDATE
         };
         
         // [MQ 발행] 결제 서비스가 구독 중인 큐(pay.request.queue)로 데이터를 쏘아 보냄
@@ -119,16 +117,15 @@ exports.requestRefund = async (req, res) => {
          * 결제 서버에 "이 주문번호 환불해 줘"라고 RabbitMQ 메시지를 보냄.
          */
         const messagePayload = {
-            orderId: refundPayload.ticket_code,
-            memberId: Number(refundPayload.member_id),
-            amount: Number(refundPayload.cancel_amount),      // 환불 총액 (보통 결제 총액과 같음)
-            
-            // 🌟 [핵심 변경 사항] 환불 시 지갑 서버에서 정산 취소를 위해 사용할 데이터
-            originalAmount: Number(refundPayload.ticketPrice), // 순수 티켓 1장의 가격
-            fee: Number(refundPayload.salesCommissionRate),    // 아티스트 판매 수수료율
-            
-            quantity: Number(refundPayload.ticket_count) || 1, // 0보다는 실제 수량이 안전
-            type: "REFUND", // 타입만 REFUND로 바꿔서 결제 서버에 전달
+            orderId: refundPayload.ticketCode,         // 🌟 서비스 규격 ticketCode
+            memberId: Number(refundPayload.memberId),
+            artistId: refundPayload.artistId ? Number(refundPayload.artistId) : null,
+            amount: Number(refundPayload.totalPrice),
+            originalPrice: Number(refundPayload.ticketPrice), 
+            fee: Number(refundPayload.salesCommissionRate),
+            quantity: Number(refundPayload.quantity),  // 🌟 ticket_count 대신 quantity 사용!
+            type: "REFUND",
+            eventTitle: refundPayload.eventTitle,
             replyRoutingKey: ROUTING_KEYS.STATUS_UPDATE
         };
 

@@ -6,6 +6,39 @@ const eventRepository = require('../repositories/eventRepository');
 const { SCALE_POLICIES } = require('../constants/policy'); // 규모별 정책 상수 (S, M, L)
 
 /**
+ * [공연 신청 및 승인 요청] - POST /events 대응
+ * -------------------------------------------------------------------------
+ * 에러 해결: member_id가 undefined일 때 BigInt 변환으로 터지는 문제 방어
+ * -------------------------------------------------------------------------
+ */
+exports.requestEventApproval = async (eventData) => {
+    // 1. 주소를 좌표로 변환 (기존 getCoordinates 활용)
+    const coords = await this.getCoordinates(eventData.address);
+    if (!coords) {
+        throw new Error("주소를 좌표로 변환할 수 없습니다. 주소를 확인해주세요.");
+    }
+
+    // 2. 사용자 ID 추출 (Java Long 타입의 CamelCase/SnakeCase 모두 대응)
+    const memberId = eventData.member_id || eventData.memberId;
+
+    /**
+     * [BigInt 에러 방어]
+     * memberId가 없으면 repository의 BigInt() 생성자에서 에러가 발생하므로 여기서 사전 차단
+     */
+    if (memberId === undefined || memberId === null) {
+        throw new Error("신청 실패: 사용자 ID(member_id)가 누락되었습니다.");
+    }
+
+    // 3. 좌표와 정제된 ID를 포함하여 레포지토리에 저장 요청
+    return await eventRepository.createEventRequest({
+        ...eventData,
+        member_id: memberId,
+        lat: coords.lat,
+        lng: coords.lng
+    });
+};
+
+/**
  * [전체 이벤트 재고 Redis Warm-up]
  * 티켓 오픈 시 DB 부하를 줄이기 위해 승인된 공연의 재고를 Redis에 미리 로드함
  */
@@ -95,30 +128,44 @@ exports.initEventStock = async (eventId, stockCount) => {
 
 /**
  * [관리자 응답 처리 서비스]
- * 관리자의 승인/거절 신호를 처리하며, 승인 시 규모별 정산 정책을 자동 생성함
+ * -------------------------------------------------------------------------
+ * 역할: 관리자의 승인/거절 신호를 처리하고, 승인 시 정책 자동 생성 트랜잭션 실행
+ * 해결: Java(Long) -> Node(BigInt) 변환 시 발생하는 undefined 에러 방어 로직 추가
+ * -------------------------------------------------------------------------
  */
 exports.processAdminResponse = async (response) => {
+    // [디버깅] Java 서버나 Postman에서 데이터가 어떻게 들어오는지 확인
+    console.log("📥 [Admin Response Data]:", response);
+
+    // 1. 변수 추출 (Java의 CamelCase와 DB의 SnakeCase 모두 대응)
     const incomingId = response.eventId || response.approvalId;
-    const { status, admin_id, rejectionReason } = response;
+    const admin_id = response.admin_id || response.adminId; // 💡 여기서 둘 다 체크하는 게 핵심!
+    const { status, rejectionReason } = response;
 
-    if (!incomingId) throw new Error("ID가 전달되지 않았음");
+    // [유효성 검사] 필수 데이터가 없으면 에러를 내서 BigInt 변환 시도를 차단함
+    if (!incomingId) throw new Error("공연 ID(eventId)가 전달되지 않았음");
+    if (!status) throw new Error("승인 상태(status) 정보가 누락되었음");
 
-    // 1. 승인 요청 기록이 존재하는지 먼저 확인
+    // 2. 승인 요청 기록이 존재하는지 먼저 확인
     const approvalReq = await eventRepository.findApprovalById(incomingId);
     if (!approvalReq) throw new Error(`승인 요청건을 찾을 수 없음: ${incomingId}`);
 
     const actualEventId = approvalReq.event_id;
 
-    // 2. 트랜잭션 처리: 공연 상태 변경과 수수료 정책 저장을 일관되게 처리
+    // 3. 트랜잭션 처리: 상태 변경과 정책 저장을 한 번에 처리
     return await prisma.$transaction(async (tx) => {
         if (status === 'CONFIRMED') {
-            // 공연 상태를 'CONFIRMED'로 업데이트하고 업데이트된 정보를 가져옴
+            /**
+             * [공연 승인 프로세스]
+             * eventRepository.confirmEvent 내부에서 BigInt(admin_id)를 호출하므로 
+             * 여기서 admin_id가 확실히 존재하는지 한 번 더 체크함.
+             */
             const updatedEvent = await eventRepository.confirmEvent(tx, actualEventId, admin_id);
 
-            // [자동화 로직] 좌석 수 기준(total_capacity)으로 정책(S/M/L) 자동 결정
+            // [자동화] SCALE_POLICIES(상수)에서 좌석 수에 맞는 정책(S/M/L) 탐색
             const policy = SCALE_POLICIES.find(p => updatedEvent.total_capacity >= p.min);
 
-            // 결정된 정책(등급, 정산주기, 수수료율)을 정책 테이블에 저장
+            // [정책 저장] 결정된 수수료율 및 정산 방식을 DB에 기록
             await tx.event_fee_policies.create({
                 data: {
                     event_id: actualEventId,
@@ -128,11 +175,11 @@ exports.processAdminResponse = async (response) => {
                 }
             });
 
-            console.log(`✨ [자동화] 공연 ${actualEventId}: ${policy.group}그룹 정책 수립`);
+            console.log(`✨ [자동화 완료] 공연 ${actualEventId}: ${policy.group}그룹 정책 수립`);
             return updatedEvent;
 
         } else if (status === 'FAILED') {
-            // 거절 처리 (rejectionReason 포함)
+            // [거절 프로세스] 반려 사유와 함께 상태 업데이트
             return await eventRepository.rejectEvent(tx, actualEventId, admin_id, rejectionReason);
         }
     });

@@ -92,15 +92,15 @@ exports.validateAndPrepare = async (eventId, count, memberId) => {
 
         // [결과 반환] 모든 검증이 끝나면 Controller에서 사용할 최종 예약 명세서를 넘겨줌
         return { 
-            totalPrice, 
-            bookingFee, 
-            ticketCode, 
-            eventTitle: event.title, 
-            remainingStock,
-            
-            // 🌟 [추가] 컨트롤러가 MQ로 전송할 때 사용할 원가와 수수료율
-            ticketPrice: event.price, 
-            salesCommissionRate: salesCommissionRate 
+            ticketCode: ticketCode,           // 통일
+            memberId: Number(memberId),       // 통일
+            totalPrice: totalPrice,           // 통일
+            quantity: count,                  // ticket_count 대신 quantity로 통일
+            artistId: event.artist_id,        // 통일
+            ticketPrice: event.price,         // 통일
+            salesCommissionRate: salesCommissionRate, 
+            eventTitle: event.title,
+            bookingFee: bookingFee            // DB 저장용 
         };
 
     } catch (err) {
@@ -204,15 +204,15 @@ exports.processRefund = async (ticketCode, memberId) => {
      * [환불 명세서 반환]
      * 검증이 모두 통과되면 결제 서버로 보낼 메시지 구성에 필요한 최소 정보를 반환함.
      */
-    return {
-        ticket_code: ticketCode,
-        member_id: memberId,
-        cancel_amount: reservation.total_price, 
-        ticket_count: reservation.ticket_count,
-        booking_fee: reservation.booking_fee,
-        
-        // 🌟 [추가] 컨트롤러가 환불 큐를 보낼 때 사용할 원가와 수수료율 데이터
+   return {
+        ticketCode: ticketCode,
+        memberId: Number(memberId),
+        totalPrice: reservation.total_price, 
+        quantity: reservation.ticket_count, // 🚩 이름을 quantity로 확정
+        artistId: event ? event.artist_id : null,
         ticketPrice: event ? event.price : 0,
-        salesCommissionRate: salesCommissionRate
+        salesCommissionRate: salesCommissionRate,
+        eventTitle: event ? event.title : "환불 요청"
+        // 💡 bookingFee는 자바에서 안 받으므로 리턴에서 제외하거나 무시
     };
 };

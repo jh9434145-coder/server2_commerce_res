@@ -142,10 +142,23 @@ const formatToSpring = (dateInput) => {
  * [4] 🌟 공연 등록 신청 (관리자 승인 요청)
  */
 exports.requestEventApproval = async (req, res) => {
-    // 프론트에서 넘어온 데이터를 변수에 담음
-    const { requester_id, title, total_capacity, price, description, venue, address, event_date, open_time, close_time, images, artist_id, artist_name, event_type } = req.body;
+    // 1. 데이터 추출 (member_id와 requester_id 둘 다 대응하도록 수정)
+    const { 
+        requester_id, member_id, // 👈 포스트맨에서 member_id로 보내도 받을 수 있게 추가
+        title, total_capacity, price, description, venue, address, 
+        event_date, open_time, close_time, images, 
+        artist_id, artist_name, event_type 
+        } = req.body;
 
     try {
+        // [방어 코드] BigInt로 변환할 핵심 ID들이 있는지 먼저 확인
+        // 만약 포스트맨에서 'member_id'로 보냈다면 그걸 'requester_id'로 써야 함
+        const finalRequesterId = requester_id || member_id;
+        // artist_id가 없으면 일단 requester_id와 동일하게 처리하거나 에러 방지
+        const finalArtistId = artist_id || finalRequesterId;
+
+        if (!finalRequesterId) throw new Error("requester_id(또는 member_id)가 누락되었습니다.");
+
         // 주소를 좌표로 변환함 (지도 표시용)
         const coords = await eventService.getCoordinates(address);
         const lat = coords ? coords.lat : null;
@@ -166,11 +179,15 @@ exports.requestEventApproval = async (req, res) => {
          * 공연 생성, 위치 저장, 승인 요청서 작성이 모두 하나라도 실패하면 원복됨.
          * 데이터 무결성을 보장하는 가장 중요한 구간.
          */
-        const { newEvent, approvalReq } = await prisma.$transaction(async (tx) => {
-            // 1. 공연 기본 정보를 DB에 생성
+       const { newEvent, approvalReq } = await prisma.$transaction(async (tx) => {
+            // (1) 공연 기본 정보 생성
             const createdEvent = await tx.events.create({
                 data: {
-                    title, artist_id: BigInt(artist_id), artist_name, event_type, description,
+                    title, 
+                    artist_id: BigInt(finalArtistId), // 🚩 안전하게 확보된 ID 사용
+                    artist_name, 
+                    event_type, 
+                    description,
                     price: parseInt(price, 10),
                     total_capacity: parseInt(total_capacity, 10),
                     available_seats: parseInt(total_capacity, 10),
@@ -181,7 +198,7 @@ exports.requestEventApproval = async (req, res) => {
                 }
             });
 
-            // 2. 공연 장소와 좌표 정보를 DB에 생성
+            // (2) 장소 정보 생성
             await tx.event_locations.create({
                 data: {
                     event_id: createdEvent.event_id,
@@ -189,17 +206,17 @@ exports.requestEventApproval = async (req, res) => {
                 }
             });
 
-            // 3. 관리자 확인용 승인 요청 데이터를 생성
+            // (3) 승인 요청 데이터 생성
             const createdApproval = await tx.event_approvals.create({
                 data: {
                     event_id: createdEvent.event_id,
-                    requester_id: BigInt(requester_id),
+                    requester_id: BigInt(finalRequesterId), // 🚩 안전하게 확보된 ID 사용
                     status: 'PENDING',
                     event_snapshot: eventSnapshot
                 }
             });
 
-            // 생성된 승인 ID를 공연 정보에 다시 업데이트함
+            // 승인 ID 업데이트
             await tx.events.update({
                 where: { event_id: createdEvent.event_id },
                 data: { approval_id: createdApproval.approval_id }
@@ -208,11 +225,10 @@ exports.requestEventApproval = async (req, res) => {
             return { newEvent: createdEvent, approvalReq: createdApproval };
         });
 
-        // 4. 🚀 Java DTO 조립 (반드시 사용하기 전에 선언!)
-        // [MSA] 자바 관리자 서버가 이해할 수 있는 형태(DTO)로 데이터를 포장함
+        // 3. [MSA] Java DTO 조립
         const eventResultDTO = {
             approvalId: Number(newEvent.event_id), 
-            requesterId: Number(requester_id), 
+            requesterId: Number(finalRequesterId), 
             status: 'PENDING',
             eventTitle: title,
             rejectionReason: null,
@@ -222,12 +238,10 @@ exports.requestEventApproval = async (req, res) => {
             price: Number(price)
         };
 
-        // RabbitMQ를 통해 관리자 서버로 "승인해달라"고 메시지를 쏨
+        // RabbitMQ 전송
         await mq.publishToQueue(mq.ROUTING_KEYS.EVENT_REQ_ADMIN, eventResultDTO);
 
-        // 최종 응답 및 로그 (이제 eventResultDTO를 마음껏 써도 돼!)
-        // 결과 응답 (202 코드는 '요청이 접수됨'을 의미함)
-        console.log(`📤 [관리자 전송 성공] 보낸 ID(approvalId): ${eventResultDTO.approvalId}, 제목: ${eventResultDTO.eventTitle}`);
+        console.log(`📤 [관리자 전송 성공] ID: ${eventResultDTO.approvalId}, 제목: ${eventResultDTO.eventTitle}`);
         
         res.status(202).json({ 
             message: "신청 완료", 
@@ -235,6 +249,7 @@ exports.requestEventApproval = async (req, res) => {
         });
 
     } catch (error) {
+        // 여기서 "Cannot convert undefined to a BigInt" 에러가 잡힘
         console.error("❌ 승인 요청 실패:", error.message);
         res.status(500).json({ message: `신청 실패: ${error.message}` });
     }

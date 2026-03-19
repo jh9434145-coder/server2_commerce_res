@@ -3,8 +3,7 @@
  * 담당: Prisma를 이용한 공연 관련 PostgreSQL(Server 1) 데이터 제어
  */
 
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient(); 
+const prisma = require('../config/prisma');
 
 /**
  * [Redis Warm-up용 DB 재고 조회]

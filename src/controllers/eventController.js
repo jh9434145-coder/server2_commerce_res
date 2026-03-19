@@ -1,14 +1,11 @@
 // src/controllers/eventController.js
 
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
-
+const prisma = require('../config/prisma');
 const eventService = require('../services/eventService');
 const resService = require('../services/resService'); // warmup 등을 위해 필요
 const eventRepository = require('../repositories/eventRepository'); // 이벤트 목록 조회용
 const redis = require('../config/redisClient'); // 🚀 Redis 클라이언트 필수!
 const mq = require('../config/rabbitMQ');
-// src/controllers/eventController.js 맨 위쪽
 const { SCALE_POLICIES, INTERNAL_VENUE_POLICY, INTERNAL_VENUES } = require('../constants/policy');
 
 /**
@@ -336,7 +333,10 @@ exports.requestEventApproval = async (req, res) => {
             // 🌟 이 정보를 Java로 쏴줘야, 나중에 승인될 때 이 값을 다시 받아와서 DB에 저장할 수 있음!
             salesCommissionRate: appliedPolicy.rate,
             settlementType: appliedPolicy.type,
-            scaleGroup: appliedPolicy.group.substring(0, 1) // 문자열 1자리만 넘기기 (L, M, S, C)
+            scaleGroup: appliedPolicy.group.substring(0, 1), // 문자열 1자리만 넘기기 (L, M, S, C)
+            // 🌟 [추가] 관리자 페이지에서 바로 이미지를 볼 수 있게 URL 전달
+            // 이미지 배열이 있다면 첫 번째 이미지(포스터)를 보내줌
+            imageUrl: (images && images.length > 0) ? images[0] : null
         };
 
         // RabbitMQ 전송 (라우팅 키: admin.event.request)

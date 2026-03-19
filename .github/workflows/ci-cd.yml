@@ -12,19 +12,47 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # 1. DockerHub 로그인
       - name: Login to DockerHub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      # 이미지 빌드 및 푸시
+      # 2. 이미지 빌드 및 푸시 (Reservation 전용)
       - name: Build and Push Docker Image
         run: |
-          docker build -t ${{ secrets.DOCKER_USERNAME }}/msa-reservation:latest .
-          docker push ${{ secrets.DOCKER_USERNAME }}/msa-reservation:latest
+          IMAGE_NAME=${{ secrets.DOCKER_USERNAME }}/msa-reservation
+          docker build -t $IMAGE_NAME:latest .
+          docker push $IMAGE_NAME:latest
 
-      # GCP Server 2 (서비스 서버) 배포
+      # 3. GitHub Actions 러너의 공용 IP 가져오기
+      - name: Get Runner IP
+        id: ip
+        run: echo "ipv4=$(curl -s https://api.ipify.org)" >> $GITHUB_OUTPUT
+
+      # 4. GCP 인증 (SA Key 사용)
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      # 5. gcloud SDK 설정
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      # 6. SSH 포트 임시 허용 (러너 IP만 22번 포트 개방)
+      - name: Open Firewall for Deployment
+        run: |
+          gcloud compute firewall-rules create allow-ssh-reservation-${{ github.run_id }} \
+            --direction=INGRESS \
+            --priority=100 \
+            --action=ALLOW \
+            --rules=tcp:22 \
+            --source-ranges=${{ steps.ip.outputs.ipv4 }}/32 \
+            --description="Temporary SSH access for Reservation CI/CD"
+
+      # 7. GCP Server 2 배포 및 실행
       - name: Deploy to GCP Server 2
         uses: appleboy/ssh-action@master
         with:
@@ -32,36 +60,29 @@ jobs:
           username: ${{ secrets.GCP_USER }}
           key: ${{ secrets.GCP_KEY }}
           script: |
-            # 작업 디렉터리 생성 및 이동 (동적 계정명 적용)
-            mkdir -p /home/${{ secrets.GCP_USER }}/reservation
-            cd /home/${{ secrets.GCP_USER }}/reservation
+            WORK_DIR="/home/${{ secrets.GCP_USER }}/reservation"
+            mkdir -p $WORK_DIR
+            cd $WORK_DIR
             
-            # 1. 환경 변수 파일(.env) 동적 생성
+            # 네트워크 사전 구성
+            docker network inspect msa-network >/dev/null 2>&1 || docker network create msa-network
+            
+            # .env 파일 완벽 동적 생성
             cat <<EOF > .env
-            # PostgreSQL (1서버)
             DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@${{ secrets.GCP_SERVER_1 }}:5432/msa_res_db?schema=res"
-            
-            # RabbitMQ (1서버)
             RABBITMQ_URL="amqp://${{ secrets.RABBITMQ_USER }}:${{ secrets.RABBITMQ_PASSWORD }}@${{ secrets.GCP_SERVER_1 }}:${{ secrets.RABBITMQ_PORT }}"
             RABBITMQ_USER=${{ secrets.RABBITMQ_USER }}
             RABBITMQ_PASSWORD=${{ secrets.RABBITMQ_PASSWORD }}
             RABBITMQ_HOST=${{ secrets.GCP_SERVER_1 }}
-            
-            # Redis (1서버)
             REDIS_HOST=${{ secrets.GCP_SERVER_1 }}
             REDIS_PORT=${{ secrets.REDIS_PORT }}
-            # REDIS_PASSWORD=필요시 추가
-            
-            # App Config
             PORT=8082
             TZ=Asia/Seoul
-            
-            # Kakao API (Secret 이름 매핑 확인 요망)
             KAKAO_REST_API_KEY=${{ secrets.KAKAO_PAY_SECRET_KEY }}
             KAKAO_API_URL=https://dapi.kakao.com/v2/local/search/address.json
             EOF
             
-            # 2. docker-compose.yml 생성
+            # docker-compose.yml 생성
             cat <<EOF > docker-compose.yml
             services:
               reservation:
@@ -79,7 +100,13 @@ jobs:
                 external: true
             EOF
             
-            # 3. 컨테이너 실행 및 사용하지 않는 이미지 정리
+            # 컨테이너 실행 및 정리
             docker compose pull
-            docker compose up -d
+            docker compose up -d --force-recreate
             docker image prune -f
+
+      # 8. 방화벽 규칙 삭제 (실패 여부 상관없이 무조건 실행하여 보안 유지)
+      - name: Close Firewall
+        if: always()
+        run: |
+          gcloud compute firewall-rules delete allow-ssh-reservation-${{ github.run_id }} --quiet

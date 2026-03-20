@@ -74,6 +74,7 @@ jobs:
             RABBITMQ_USER=${{ secrets.RABBITMQ_USER }}
             RABBITMQ_PASSWORD=${{ secrets.RABBITMQ_PASSWORD }}
             RABBITMQ_HOST=${{ secrets.GCP_SERVER_1 }}
+            RABBITMQ_PORT=${{ secrets.RABBITMQ_PORT }}
             REDIS_HOST=${{ secrets.GCP_SERVER_1 }}
             REDIS_PORT=${{ secrets.REDIS_PORT }}
             PORT=8082

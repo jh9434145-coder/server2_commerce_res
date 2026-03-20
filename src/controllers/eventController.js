@@ -327,6 +327,7 @@ exports.requestEventApproval = async (req, res) => {
             eventStartDate: formatToSpring(event_date),
             location: venue,
             price: Number(price),
+            totalCapacity: parseInt(total_capacity, 10) || 0,
             ageLimit: parseInt(age_limit, 10) || 0,
             runningTime: parseInt(running_time, 10) || 0,
             isStanding: is_standing === true || is_standing === 'true',

@@ -86,10 +86,16 @@ exports.createReservation = async (req, res) => {
 exports.getReservationStatus = async (req, res) => {
     try {
         // [파라미터 추출] 조회하고자 하는 유저의 ID를 URL 경로에서 가져옴
-        const { userId } = req.params;
+        // const { userId } = req.params;
+        // [파라미터 추출] 특정 결제 건을 확인하기 위해 티켓 코드를 받음
+        const { ticketCode } = req.params;
+
+        // [DB 조회] 해당 티켓의 현재 상태(PENDING, CONFIRMED, FAILED 등)를 가져옴
+        // (주의: resService.checkStatus 함수는 서비스 단에 구현되어 있어야 해)
+        const status = await resService.checkStatus(ticketCode);
         
         // [구현 예정] 비동기 처리 특성상 클라이언트가 본인의 예약이 성공했는지 폴링(Polling)할 때 사용될 엔드포인트임
-        res.json({ message: "조회 기능 준비 중", userId });
+        res.status(200).json({ ticketCode, status });
     } catch (error) {
         console.error("❌ 예약 상태 조회 오류:", error);
         res.status(500).json({ message: "상태 조회 중 오류 발생" });

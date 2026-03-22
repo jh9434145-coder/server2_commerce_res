@@ -70,6 +70,8 @@ const startConsumer = require('./messaging/listener/consumer');
 const startCancelConsumer = require('./messaging/listener/cancelConsumer');
 const startStatusUpdateConsumer = require('./messaging/listener/statusUpdateConsumer');
 const startEventResponseConsumer = require('./messaging/listener/eventResponseConsumer');
+const startRefundResponseConsumer = require('./messaging/listener/refundResponseConsumer'); // 🌟 [추가] 환불 승인 리스너
+const startDashboardConsumer = require('./messaging/listener/dashboardConsumer');
 
 /**
  * [서버 리스닝 및 초기화 프로세스]
@@ -93,6 +95,10 @@ app.listen(PORT, async () => {
         await startStatusUpdateConsumer();
         // 🌟 공연 승인 결과 처리 컨슈머 실행
         await startEventResponseConsumer();
+        // 🌟 [추가] 환불 승인 결과 처리 컨슈머 실행
+        await startRefundResponseConsumer();
+        // 대시보드 컨슈머 시작
+        await startDashboardConsumer();
 
         console.log("✅ [Messaging] 모든 RabbitMQ 컨슈머 연결 성공");
 
@@ -101,7 +107,15 @@ app.listen(PORT, async () => {
          * 티켓팅 오픈 전 DB의 최신 재고 데이터를 Redis로 미리 로드하여 
          * 첫 요청부터 초고속 선착순 처리가 가능하게 준비함.
          */
-        await eventService.warmupAllEventsToRedis();
+        setTimeout(async () => {
+            try {
+                console.log("🔄 [Warm-up] Starting Redis Warm-up...");
+                await eventService.warmupAllEventsToRedis();
+                console.log(`✅ [Warm-up] 모든 이벤트 재고 Redis 동기화 완료`);
+            } catch (err) {
+                console.error("❌ [Warm-up Error] 초기화 중 오류 발생:", err.message);
+            }
+        }, 2000);
         
         console.log(`✅ [Warm-up] 모든 이벤트 재고 Redis 동기화 완료`);
 

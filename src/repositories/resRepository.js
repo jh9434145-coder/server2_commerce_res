@@ -4,23 +4,8 @@
  * FanVerse - Reservation Repository Layer
  * 담당: Prisma를 이용한 예약 관련 PostgreSQL(Server 1) 데이터 제어
  */
-
-const { PrismaClient } = require('@prisma/client');
-
-/**
- * [Prisma 인스턴스 초기화]
- * 데이터베이스 연결 설정 및 환경 변수를 로드하여 DB 서버와의 통신 준비를 마침
- */
-const prisma = new PrismaClient({
-  datasources: {
-    db: {
-      url: process.env.DATABASE_URL, 
-    },
-  },
-});
-
-// [디버깅 로그] 서버 구동 시 현재 연결된 DB의 호스트 주소를 노출하여 연결 상태를 즉시 확인함
-console.log(`🗄️ [Target] ${process.env.DATABASE_URL?.split('/').pop()?.split('?')[0] || "unknown"} 스키마 사용 중`);
+// ✅ 공용 설정을 불러오기만 하면 끝!
+const prisma = require('../config/prisma');
 
 /**
  * [예약 생성 트랜잭션]
@@ -66,7 +51,8 @@ exports.createReservationWithTransaction = async (data) => {
                 booking_fee: data.booking_fee,
                 total_price: data.total_price,
                 ticket_code: data.ticket_code,
-                status: 'PENDING' 
+                status: 'PENDING',
+                selected_seats: data.selected_seats
             }
         });
 
@@ -158,5 +144,83 @@ exports.completeRefund = async (ticket_code, event_id, ticket_count) => {
         });
 
         return updatedRes;
+    });
+};
+
+/**
+ * [내 예매 내역 조회 - Repository]
+ * 스키마 반영: image_role('POSTER'), venue 필드 대응
+ */
+exports.findReservationsByMemberId = async (memberId) => {
+    return await prisma.reservations.findMany({
+        where: { 
+            member_id: BigInt(memberId) 
+        },
+        include: {
+            events: {
+                include: {
+                    event_locations: true, // venue, address 포함
+                    event_images: {
+                        where: { image_role: 'POSTER' }, // 🌟 스키마에 정의된 'POSTER' 역할만!
+                        take: 1
+                    }
+                }
+            }
+        },
+        orderBy: { booked_at: 'desc' } // 🌟 스키마의 booked_at 기준 정렬
+    });
+};
+
+// 🌟 핵심: 특정 이벤트의 예매자 데이터만 DB에서 순수하게 조회
+exports.findReservationsByEventId = async (eventId) => {
+    return await prisma.reservations.findMany({
+        where:{
+            event_id: parseInt(eventId),
+            status: 'CONFIRMED'
+        },
+        select: {
+            reservation_id: true,
+            member_id: true,
+            status: true,
+            booked_at: true,
+            ticket_count: true
+        }
+    });
+}
+
+// [DB 조회] 특정 아티스트의 최근 5일 예매 내역 조회
+exports.getRecentReservationsByArtist = async (artistId, startDate) => {
+  return await prisma.reservations.findMany({
+    where: {
+      event: {
+        artist_id: BigInt(artistId) // 스키마에 BIGINT로 되어 있으니 변환
+      },
+      booked_at: {
+        gte: startDate
+      },
+      status: {
+        in: ['CONFIRMED', 'PENDING']
+      }
+    },
+    select: {
+      booked_at: true,
+      ticket_count: true
+    }
+  });
+};
+
+
+/**
+ * [상태 조회] 티켓 코드로 현재 예약 상태 확인
+ * 폴링 서비스 및 상태 체크 로직에서 사용
+ */
+exports.getStatusByTicketCode = async (ticketCode) => {
+    /**
+     * [단일 필드 조회]
+     * ticket_code는 UNIQUE 제약조건이 걸려있으므로 findUnique로 빠르게 조회 가능함
+     */
+    return await prisma.reservations.findUnique({
+        where: { ticket_code: ticketCode },
+        select: { status: true } // 🌟 성능 최적화: 상태값만 쏙 뽑아옴
     });
 };

@@ -1,42 +1,55 @@
 // src/controllers/eventController.js
 
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
-
+const prisma = require('../config/prisma');
 const eventService = require('../services/eventService');
 const resService = require('../services/resService'); // warmup 등을 위해 필요
 const eventRepository = require('../repositories/eventRepository'); // 이벤트 목록 조회용
 const redis = require('../config/redisClient'); // 🚀 Redis 클라이언트 필수!
 const mq = require('../config/rabbitMQ');
+const { SCALE_POLICIES, INTERNAL_VENUE_POLICY, INTERNAL_VENUES } = require('../constants/policy');
 
-/**
- * [1] 모든 이벤트(공연) 목록 조회
- * 서비스 초기 화면에 뿌려줄 모든 공연 데이터를 가져옴
- */
+
+// [1] 유저용: 전체 목록 조회
 exports.getAllEvents = async (req, res) => {
     try {
-        // [Repository 패턴 활용] DB 계층에 직접 쿼리를 날리지 않고, 미리 정의된 리포지토리를 호출해 공연 목록을 가져옴
-        const events = await eventRepository.findAllEvents();
+        const events = await eventRepository.findAllEvents(); // 레포지토리 이름 유지
         
-        // [방어 코드] 만약 DB 결과가 아예 없거나 null이라면, 프론트엔드에서 map 함수 등을 쓸 때 에러가 나지 않게 빈 배열로 초기화함
-        if (!events) return res.status(200).json([]);
-
-        /**
-         * [BigInt 직렬화 처리] 
-         * JSON.stringify는 JavaScript의 BigInt 타입을 처리하지 못하므로, 모든 속성을 순회하며 BigInt만 찾아 String으로 변환함.
-         * 이를 문자열로 변환해주지 않으면 서버가 뻗기 때문에 반드시 거쳐야 하는 변환 과정
-         * 이 작업을 거치지 않으면 "Do not know how to serialize a BigInt" 에러가 발생하며 서버가 중단됨.
-         */
-        const safeEvents = JSON.parse(JSON.stringify(events, (key, value) =>
-            typeof value === 'bigint' ? value.toString() : value
-        ));
-
-        // [최종 응답] 직렬화 처리가 완료된 안전한 JSON 데이터를 클라이언트에 200 상태코드와 함께 전송함
-        res.status(200).json(safeEvents);
+        // 🚨 여기서 serializeBigInt 사용!
+        res.status(200).json({ 
+            events: serializeBigInt(events) 
+        });
     } catch (err) {
-        console.error("❌ 이벤트 조회 오류:", err); 
-        res.status(500).json({ message: "공연 목록을 불러오지 못했습니다." });
+        console.error("❌ 유저 이벤트 조회 오류:", err);
+        res.status(500).json({ message: "공연 목록 로드 실패" });
     }
+};
+
+// [2] 아티스트용: 내 공연 목록 조회
+exports.getMyEvents = async (req, res) => {
+    try {
+        const artistId = req.headers['x-user-id'];
+        if (!artistId) return res.status(400).json({ message: "artistId 누락" });
+
+        const events = await eventRepository.findArtistEvents(artistId); // 레포지토리 이름 유지
+        
+        // 🚨 여기서도 serializeBigInt 사용!
+        res.status(200).json({ 
+            events: serializeBigInt(events) 
+        });
+    } catch (err) {
+        console.error("❌ 아티스트 이벤트 조회 오류:", err);
+        res.status(500).json({ message: "내 공연 로드 실패" });
+    }
+};
+
+/**
+ * 🌟 BigInt 변환 유틸 (절대 삭제 금지)
+ * JSON.stringify가 처리 못하는 BigInt를 문자열로 바꿔줌
+ */
+const serializeBigInt = (data) => {
+    return JSON.parse(JSON.stringify(data, (k, v) => 
+        typeof v === 'bigint' ? v.toString() : v
+    ));
 };
 
 /**
@@ -44,26 +57,64 @@ exports.getAllEvents = async (req, res) => {
  */
 exports.getEventDetail = async (req, res) => {
     try {
-        // [파라미터 추출] 클라이언트가 요청한 URL 경로에서 :eventId 변수값을 꺼내옴
         const { eventId } = req.params;
+        const { memberId } = req.query; // 프론트에서 보낸 ?memberId=1
+        const parsedEventId = parseInt(eventId, 10);
 
-        /**
-         * [단일 레코드 조회] 
-         * URL 파라미터는 문자열이므로 parseInt를 통해 10진수 숫자로 변환함. 
-         * Prisma의 findUnique는 PK(Primary Key)를 사용하여 가장 빠른 속도로 하나의 데이터를 조회함.
-         */
+        // 1. Prisma 조회 시 include를 조건부로 처리
+        const includeOptions = {
+            event_locations: true,
+        };
+
+        // 🌟 중요: memberId가 있을 때만 위시리스트 포함 (false를 넣으면 에러 남!)
+        if (memberId && memberId !== 'undefined' && memberId !== 'null') {
+            includeOptions.event_wishlists = {
+                where: { member_id: BigInt(memberId) }
+            };
+        }
+
         const event = await prisma.events.findUnique({
-            where: { event_id: parseInt(eventId, 10) } 
+            where: { event_id: parsedEventId },
+            include: includeOptions
         });
         
-        // [예외 처리] 만약 해당 ID로 조회된 공연이 없다면, 리소스가 없음을 알리는 404 상태코드를 반환함
         if (!event) return res.status(404).json({ message: "공연을 찾을 수 없습니다." });
 
-        // [응답] 조회된 단일 공연 정보를 JSON 형태로 전송함
-        res.json(event);
+        // 2. 예약된 좌석 목록 가져오기 (기존 로직 유지)
+        const reservations = await prisma.reservations.findMany({
+            where: {
+                event_id: parsedEventId,
+                status: { notIn: ['FAILED', 'REFUNDED'] },
+                selected_seats: { not: null }
+            },
+            select: { selected_seats: true }
+        });
+
+        let reservedSeatsList = [];
+        reservations.forEach(r => {
+            if (Array.isArray(r.selected_seats)) {
+                reservedSeatsList.push(...r.selected_seats);
+            }
+        });
+
+        // 3. 찜 여부 판단
+        const isWishlisted = !!(event.event_wishlists && event.event_wishlists.length > 0);
+        
+        // 4. 🌟 BigInt 포함된 객체를 안전하게 변환 (500 에러 방지 핵심)
+        const responseData = JSON.parse(JSON.stringify({
+            ...event,
+            isWishlisted,
+            reservedSeats: reservedSeatsList
+        }, (key, value) =>
+            typeof value === 'bigint' ? value.toString() : value
+        ));
+
+        res.json(responseData);
+
     } catch (error) {
-        console.error("❌ 상세 조회 오류:", error);
-        res.status(500).json({ message: "상세 조회 중 오류 발생" });
+        // 서버 로그에서 진짜 원인을 볼 수 있게 출력
+        console.error("❌ 상세 조회 서버 오류:", error); 
+        res.status(500).json({ message: "상세 조회 중 오류 발생", error: error.message });
     }
 };
 
@@ -138,53 +189,72 @@ const formatToSpring = (dateInput) => {
            pad(d.getMinutes()) + ':' +
            pad(d.getSeconds());
 };
+
 /**
- * [4] 🌟 공연 등록 신청 (관리자 승인 요청)
+ * [4] 🌟 공연 등록 신청 (이미지 저장 + 신규 필드 반영)
  */
 exports.requestEventApproval = async (req, res) => {
-    // 1. 데이터 추출 (member_id와 requester_id 둘 다 대응하도록 수정)
+    // 1. 데이터 추출 (신규 필드 추가: age_limit, running_time, is_standing, seat_map_config)
     const { 
-        requester_id, member_id, // 👈 포스트맨에서 member_id로 보내도 받을 수 있게 추가
+        requester_id, member_id, 
         title, total_capacity, price, description, venue, address, 
-        event_date, open_time, close_time, images, 
-        artist_id, artist_name, event_type 
-        } = req.body;
+        event_date, open_time, close_time, 
+        images, // 👈 ["url1", "url2"] 형태의 배열
+        artist_id, artist_name, event_type,
+        age_limit, running_time, is_standing, seat_map_config 
+    } = req.body;
 
     try {
-        // [방어 코드] BigInt로 변환할 핵심 ID들이 있는지 먼저 확인
-        // 만약 포스트맨에서 'member_id'로 보냈다면 그걸 'requester_id'로 써야 함
         const finalRequesterId = requester_id || member_id;
-        // artist_id가 없으면 일단 requester_id와 동일하게 처리하거나 에러 방지
         const finalArtistId = artist_id || finalRequesterId;
 
         if (!finalRequesterId) throw new Error("requester_id(또는 member_id)가 누락되었습니다.");
 
-        // 주소를 좌표로 변환함 (지도 표시용)
+        // 주소를 좌표로 변환
         const coords = await eventService.getCoordinates(address);
         const lat = coords ? coords.lat : null;
         const lng = coords ? coords.lng : null;
 
-        // 나중에 관리자가 볼 수 있게 당시 신청 정보를 스냅샷으로 저장함
+        /**
+         * 🌟 [신규 로직] 수수료 및 정산 정책 자동 계산
+         * 공연장 이름(venue)을 확인해서 자체 공연장이면 20% 고정, 아니면 좌석 수(capacity)에 따라 차등 적용
+         */
+        const parsedCapacity = parseInt(total_capacity, 10);
+        let appliedPolicy;
+        
+        if (INTERNAL_VENUES.includes(venue)) {
+            // 자체 공연장(루미나50, 100, 200)이면 무조건 20% 적용
+            appliedPolicy = INTERNAL_VENUE_POLICY; // 자체 공연장(C)
+        } else {
+            // 외부 공연장이면 규모(좌석 수)에 따라 정책 매칭 (찾지 못하면 기본 소규모 적용)
+            appliedPolicy = SCALE_POLICIES.find(p => parsedCapacity >= p.min) || SCALE_POLICIES[2];
+        }
+
+        // 관리자 확인용 스냅샷 (신규 필드 포함)
         const eventSnapshot = {
             title, artist_id, artist_name, event_type, description,
             price: parseInt(price, 10),
             total_capacity: parseInt(total_capacity, 10),
             venue, address, event_date, open_time, close_time,
-            images: images || []
+            age_limit: parseInt(age_limit, 10) || 0,
+            running_time: parseInt(running_time, 10) || 0,
+            is_standing: is_standing === true || is_standing === 'true',
+            seat_map_config: seat_map_config || null,
+            images: images || [],
+            sales_commission_rate: appliedPolicy.rate,
+            settlement_type: appliedPolicy.type
         };
 
         /**
          * 2. [핵심 로직] 트랜잭션 처리
-         * // [중요] 세 가지 DB 작업을 하나로 묶음 (하나라도 틀리면 전체 취소)
-         * 공연 생성, 위치 저장, 승인 요청서 작성이 모두 하나라도 실패하면 원복됨.
-         * 데이터 무결성을 보장하는 가장 중요한 구간.
+         * 이벤트 -> 위치 -> 이미지 -> 승인요청 순서로 저장 (원자성 보장)
          */
-       const { newEvent, approvalReq } = await prisma.$transaction(async (tx) => {
-            // (1) 공연 기본 정보 생성
+        const { newEvent, approvalReq } = await prisma.$transaction(async (tx) => {
+            // (1) 공연 기본 정보 생성 (신규 필드 포함)
             const createdEvent = await tx.events.create({
                 data: {
                     title, 
-                    artist_id: BigInt(finalArtistId), // 🚩 안전하게 확보된 ID 사용
+                    artist_id: BigInt(finalArtistId),
                     artist_name, 
                     event_type, 
                     description,
@@ -194,7 +264,11 @@ exports.requestEventApproval = async (req, res) => {
                     event_date: new Date(event_date),
                     open_time: new Date(open_time),
                     close_time: new Date(close_time),
-                    approval_status: 'PENDING'
+                    age_limit: parseInt(age_limit, 10) || 0,
+                    running_time: parseInt(running_time, 10) || 0,
+                    is_standing: is_standing === true || is_standing === 'true',
+                    seat_map_config: seat_map_config || null,
+                    approval_status: 'PENDING',
                 }
             });
 
@@ -206,17 +280,29 @@ exports.requestEventApproval = async (req, res) => {
                 }
             });
 
-            // (3) 승인 요청 데이터 생성
+            // (3) 🌟 [신규] 사진 정보 생성 (Bulk Insert)
+            if (images && Array.isArray(images) && images.length > 0) {
+                await tx.event_images.createMany({
+                    data: images.map((url, index) => ({
+                        event_id: createdEvent.event_id,
+                        image_url: url,
+                        image_role: index === 0 ? 'POSTER' : 'DETAIL', // 첫 번째는 포스터, 나머지는 상세
+                        sort_order: index
+                    }))
+                });
+            }
+
+            // (4) 승인 요청 데이터 생성
             const createdApproval = await tx.event_approvals.create({
                 data: {
                     event_id: createdEvent.event_id,
-                    requester_id: BigInt(finalRequesterId), // 🚩 안전하게 확보된 ID 사용
+                    requester_id: BigInt(finalRequesterId),
                     status: 'PENDING',
                     event_snapshot: eventSnapshot
                 }
             });
 
-            // 승인 ID 업데이트
+            // (5) 승인 ID 업데이트
             await tx.events.update({
                 where: { event_id: createdEvent.event_id },
                 data: { approval_id: createdApproval.approval_id }
@@ -225,7 +311,7 @@ exports.requestEventApproval = async (req, res) => {
             return { newEvent: createdEvent, approvalReq: createdApproval };
         });
 
-        // 3. [MSA] Java DTO 조립
+        // 3. [MSA] Java DTO 조립 (신규 필드 포함하여 관리자에게 발송)
         const eventResultDTO = {
             approvalId: Number(newEvent.event_id), 
             requesterId: Number(finalRequesterId), 
@@ -235,21 +321,31 @@ exports.requestEventApproval = async (req, res) => {
             createdAt: formatToSpring(approvalReq.created_at),
             eventStartDate: formatToSpring(event_date),
             location: venue,
-            price: Number(price)
+            price: Number(price),
+            totalCapacity: parseInt(total_capacity, 10) || 0,
+            ageLimit: parseInt(age_limit, 10) || 0,
+            runningTime: parseInt(running_time, 10) || 0,
+            isStanding: is_standing === true || is_standing === 'true',
+            // 🌟 이 정보를 Java로 쏴줘야, 나중에 승인될 때 이 값을 다시 받아와서 DB에 저장할 수 있음!
+            salesCommissionRate: appliedPolicy.rate,
+            settlementType: appliedPolicy.type,
+            scaleGroup: appliedPolicy.group.substring(0, 1), // 문자열 1자리만 넘기기 (L, M, S, C)
+            // 🌟 [추가] 관리자 페이지에서 바로 이미지를 볼 수 있게 URL 전달
+            // 이미지 배열이 있다면 첫 번째 이미지(포스터)를 보내줌
+            imageUrl: (images && images.length > 0) ? images[0] : null
         };
 
-        // RabbitMQ 전송
+        // RabbitMQ 전송 (라우팅 키: admin.event.request)
         await mq.publishToQueue(mq.ROUTING_KEYS.EVENT_REQ_ADMIN, eventResultDTO);
 
-        console.log(`📤 [관리자 전송 성공] ID: ${eventResultDTO.approvalId}, 제목: ${eventResultDTO.eventTitle}`);
+        console.log(`📤 [관리자 전송] ID: ${eventResultDTO.approvalId}, 제목: ${eventResultDTO.eventTitle}`);
         
         res.status(202).json({ 
-            message: "신청 완료", 
+            message: "신청 완료 및 이미지 등록 성공", 
             approvalId: eventResultDTO.approvalId 
         });
 
     } catch (error) {
-        // 여기서 "Cannot convert undefined to a BigInt" 에러가 잡힘
         console.error("❌ 승인 요청 실패:", error.message);
         res.status(500).json({ message: `신청 실패: ${error.message}` });
     }
@@ -273,5 +369,109 @@ exports.warmupRedis = async (req, res) => {
     } catch (err) {
         console.error("❌ Admin Warmup Error:", err);
         res.status(500).json({ error: err.message });
+    }
+};
+
+
+exports.getEventDetail = async (req, res) => {
+    try {
+        const { eventId } = req.params;
+        const { memberId } = req.query; // 쿼리스트링으로 받음
+        const parsedEventId = parseInt(eventId, 10);
+
+        // 1. 이벤트 정보 조회 (찜 여부 포함)
+        const event = await prisma.events.findUnique({
+            where: { event_id: parsedEventId },
+            include: {
+                event_locations: true,
+                // memberId가 유효할 때만 위시리스트 확인
+                event_wishlists: (memberId && memberId !== 'undefined' && memberId !== 'null') ? {
+                    where: { member_id: BigInt(memberId) }
+                } : false
+            }
+        });
+        
+        if (!event) return res.status(404).json({ message: "공연을 찾을 수 없습니다." });
+
+        // 2. 예약석 목록 가져오기 로직 (기존 유지)
+        const reservations = await prisma.reservations.findMany({
+            where: {
+                event_id: parsedEventId,
+                status: { notIn: ['FAILED', 'REFUNDED'] },
+                selected_seats: { not: null }
+            },
+            select: { selected_seats: true }
+        });
+
+        let reservedSeatsList = [];
+        reservations.forEach(r => {
+            if (Array.isArray(r.selected_seats)) {
+                reservedSeatsList.push(...r.selected_seats);
+            }
+        });
+
+        // 3. 찜 여부 계산
+        const isWishlisted = !!(event.event_wishlists && event.event_wishlists.length > 0);
+        
+        // 4. 🌟 핵심: 전체 데이터를 BigInt 안전하게 직렬화
+        // responseData를 만들 때 모든 필드를 포함시켜야 500 에러가 안 나.
+        const responseData = JSON.parse(JSON.stringify({
+            ...event,
+            isWishlisted: isWishlisted,
+            reservedSeats: reservedSeatsList
+        }, (key, value) =>
+            typeof value === 'bigint' ? value.toString() : value
+        ));
+
+        res.json(responseData);
+
+    } catch (error) {
+        console.error("❌ 상세 조회 서버 오류:", error);
+        res.status(500).json({ message: "상세 조회 중 오류 발생", error: error.message });
+    }
+};
+
+//유저 대시보드 이벤트 큐 발송
+// 유저 대시보드 진입 시 전체 이벤트 및 개인 예매 내역 큐 발송
+exports.sendDashboardQueues = async (req, res) => {
+    try {
+        // [1] 전체 이벤트 목록 조회 (기존 레포지토리 재사용)
+        const events = await eventRepository.findAllEvents();
+
+        // 큐 전송 1: 전체 이벤트 내역
+        await mq.publishToQueue('all_events_queue', {  // 👈 mq 로 변경!
+            type: 'ALL_EVENTS_LIST',
+            data: serializeBigInt(events),
+            timestamp: new Date()
+        });
+
+        // [2] 로그인 유저의 예매 내역 조회
+        const userId = req.headers['x-user-id'];
+
+        if (userId) {
+            // 레포지토리 함수 호출하여 확정된 내역만 가져옴
+            const userReservations = await eventRepository.findConfirmedReservationsByUserId(userId);
+
+            // 큐 전송 2: 특정 회원의 예매 내역
+            await mq.publishToQueue('user_reservation_queue', { 
+                type: 'MY_RESERVATIONS',
+                userId: userId.toString(),
+                data: serializeBigInt(userReservations),
+                count: userReservations.length
+            });
+            
+            console.log(`✅ 유저(${userId}) 예매 데이터 큐 전송 완료`);
+        }
+
+        console.log("✅ 전체 이벤트 목록 큐 전송 완료");
+
+        res.status(200).json({ 
+            success: true, 
+            message: "대시보드 데이터 큐 전송 성공" 
+        });
+
+    } catch (err) {
+        console.error("❌ 대시보드 데이터 처리 중 오류:", err);
+        res.status(500).json({ message: "데이터 처리 실패" });
     }
 };

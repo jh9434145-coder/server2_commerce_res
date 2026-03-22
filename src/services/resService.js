@@ -131,7 +131,8 @@ exports.makeReservation = async (resData, memberId) => {
         member_id: memberId,
         total_price: resData.totalPrice || resData.total_price,
         booking_fee: resData.bookingFee || resData.booking_fee,
-        ticket_code: resData.ticketCode || resData.ticket_code
+        ticket_code: resData.ticketCode || resData.ticket_code,
+        selected_seats: resData.selected_seats || null
     };
 
     /**
@@ -215,4 +216,167 @@ exports.processRefund = async (ticketCode, memberId) => {
         eventTitle: event ? event.title : "환불 요청"
         // 💡 bookingFee는 자바에서 안 받으므로 리턴에서 제외하거나 무시
     };
+};
+
+/**
+ * [관리자 환불 승인 요청 준비] - 2번 과제 추가 로직
+ * -------------------------------------------------------------------------
+ * 목적: 사용자가 환불 요청 시 즉시 취소하지 않고, 관리자 승인 대기 상태(PENDING)로
+ * reservation_refunds 테이블에 기록을 남긴 뒤, 큐 전송용 데이터를 반환함.
+ * -------------------------------------------------------------------------
+ */
+exports.prepareRefundAdminRequest = async (ticketCode, memberId, refundReason) => {
+    const { PrismaClient } = require('@prisma/client');
+    const prisma = new PrismaClient();
+
+    // 1. 기존 processRefund 로직을 재활용하여 자격 검증 및 기본 데이터(금액, 아티스트 정보 등)를 가져옴
+    const refundPayload = await this.processRefund(ticketCode, memberId);
+
+    // 2. 예약 데이터 조회 (processRefund에서 이미 검증했지만, reservation_id가 필요하므로 다시 가져옴)
+    const reservation = await resRepository.findReservationByCode(ticketCode);
+    if (!reservation) throw { status: 404, message: "예매 내역을 찾을 수 없습니다." };
+
+    try {
+        // 3. 트랜잭션: 환불 테이블에 기록 & 기존 예약 상태를 'REFUND_PENDING'으로 변경
+        const refundRecord = await prisma.$transaction(async (tx) => {
+            
+            // a. reservation_refunds 테이블에 PENDING 상태로 데이터 삽입
+            const newRefund = await tx.reservation_refunds.create({
+                data: {
+                    reservation_id: reservation.reservation_id,
+                    member_id: BigInt(memberId),
+                    refund_amount: refundPayload.totalPrice,
+                    refund_reason: refundReason || "단순 변심",
+                    status: 'PENDING'
+                }
+            });
+
+            // b. reservations 테이블의 상태를 변경하여 중복 환불 요청이나 사용을 막음
+            // (참고: 기존 스키마에 REFUND_PENDING 상태가 정의되어 있다고 가정)
+            await tx.reservations.update({
+                where: { reservation_id: reservation.reservation_id },
+                data: { status: 'REFUND_PENDING', updated_at: new Date() }
+            });
+
+            return newRefund;
+        });
+
+        console.log(`✅ [환불 요청 DB 저장] RefundID: ${refundRecord.refund_id}, 상태: PENDING`);
+
+        // 4. 컨트롤러가 관리자 큐(RabbitMQ)로 전송하기 좋게 기존 payload에 생성된 환불 ID를 합쳐서 반환
+        return {
+            ...refundPayload, // ticketCode, totalPrice, artistId 등 모두 포함
+            refund_id: refundRecord.refund_id
+        };
+
+    } catch (error) {
+        console.error("❌ 환불 DB 저장 중 오류 발생:", error);
+        throw { status: 500, message: "환불 요청을 처리하는 중 서버 오류가 발생했습니다." };
+    }
+};
+
+/**
+ * [내 예매 내역 서비스]
+ */
+exports.getMyReservations = async (memberId) => {
+    const reservations = await resRepository.findReservationsByMemberId(memberId);
+
+    return reservations.map(res => ({
+        reservation_id: res.reservation_id, // UUID는 그대로 문자열 처리됨
+        ticket_code: res.ticket_code,
+        status: res.status,
+        ticket_count: res.ticket_count,
+        pure_price: res.total_price - res.booking_fee,
+        // 🌟 스냅샷에 있던 좌석 정보도 필요하면 포함
+        selected_seats: res.selected_seats, 
+        events: {
+            title: res.events.title,
+            artist_name: res.events.artist_name, // 아티스트명 추가
+            event_date: res.events.event_date,
+            // 🌟 b.events.event_locations.venue 경로 대응
+            event_locations: {
+                venue: res.events.event_locations?.venue || "장소 정보 없음"
+            },
+            poster: res.events.event_images[0]?.image_url || null
+        },
+        booked_at: res.booked_at
+    }));
+};
+
+// 이벤트 예매자 명단 가져오기
+// 🌟 핵심: Repository에서 데이터를 받아와서 엑셀용으로 평탄화
+exports.getAttendesByEventId = async (eventId) => {
+    // 1. DB 조회는 Repository에게 위임
+    const reservations = await resRepository.findReservationsByEventId(eventId);
+    // 2. 비즈니스 로직: 프론트엔드가 엑셀로 만들기 편하게 데이터 구조 가공
+    return reservations.map(res => ({
+        reserveId: res.reservation_id,
+        // 핵심 주석: BigInt 타입은 JSON 직렬화 시 에러가 나므로 toString()으로 안전하게 변환
+        memberId: res.member_id.toString(), 
+        // 핵심 주석: MSA 구조상 예매 DB에는 이름/번호가 없으므로 임시 값 매핑 (필요시 User 서비스 API 호출 필요)
+        name: `회원 ${res.member_id.toString()}`, 
+        phone: '번호 확인 불가', 
+        status: res.status,
+        date: res.booked_at ? res.booked_at.toISOString().split('T')[0] : '날짜 없음',
+        ticketCount: res.ticket_count
+    }));
+}
+
+// [비즈니스 로직] 예매 통계 데이터 가공
+exports.getTicketStats = async (artistId) => {
+  // 1. 기준일 계산 (오늘 포함 5일 전 자정)
+  const startDate = new Date();
+  startDate.setDate(startDate.getDate() - 4);
+  startDate.setHours(0, 0, 0, 0);
+
+  // 2. DB에서 데이터 조회
+  const rawData = await resRepository.getRecentReservationsByArtist(artistId, startDate);
+
+  // 3. 최근 5일 날짜 맵 초기화 (예: {'03.14': 0, '03.15': 0, ...})
+  const statsMap = {};
+  for (let i = 4; i >= 0; i--) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    const mmdd = `${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')}`;
+    statsMap[mmdd] = 0;
+  }
+
+  // 4. 조회된 데이터로 티켓 수량 누적
+  rawData.forEach(row => {
+    const d = new Date(row.booked_at);
+    const mmdd = `${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')}`;
+    if (statsMap[mmdd] !== undefined) {
+      statsMap[mmdd] += row.ticket_count;
+    }
+  });
+
+  // 5. 프론트용 배열로 변환해서 리턴
+  return Object.keys(statsMap).map(date => ({
+    date,
+    count: statsMap[date]
+  }));
+};
+
+
+// src/services/resService.js
+
+/**
+ * [추가] 티켓 코드로 예약 상태 조회
+ * 폴링 API에서 현재 예약의 상태(PENDING, CONFIRMED 등)를 확인하기 위해 사용
+ */
+exports.checkStatus = async (ticketCode) => {
+    try {
+        const reservation = await prisma.reservations.findUnique({
+            where: { ticket_code: ticketCode }
+        });
+
+        if (!reservation) {
+            return 'NOT_FOUND';
+        }
+
+        return reservation.status; // PENDING, CONFIRMED, FAILED 등이 반환됨
+    } catch (error) {
+        console.error("[resService.checkStatus] Error:", error);
+        throw error;
+    }
 };

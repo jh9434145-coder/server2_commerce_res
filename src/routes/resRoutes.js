@@ -12,10 +12,10 @@ const testController = require('../controllers/testController');
 // [파일 저장 설정]
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
-        // 🌟 OS에 상관없이 작동하도록 경로 설정
+        // 핵심 주석: 리눅스(도커) 환경에서는 외부 볼륨과 연결된 컨테이너 내부 경로(/app/public/images/res)를 사용
         const dir = process.platform === 'win32' 
-            ? path.join(process.cwd(), 'uploads') // 윈도우: 프로젝트 루트/uploads
-            : '/home/ubuntu/msa/storage';        // 리눅스: 원래 경로
+            ? path.join(process.cwd(), 'uploads') // 윈도우: 로컬 개발용
+            : (process.env.UPLOAD_DIR || '/app/public/images/res'); // 리눅스(도커): 환경변수 우선, 없으면 기본 볼륨 경로
 
         // 폴더가 없으면 자동으로 만든다
         if (!fs.existsSync(dir)) {

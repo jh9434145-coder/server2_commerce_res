@@ -350,9 +350,11 @@ exports.requestEventApproval = async (req, res) => {
             salesCommissionRate: appliedPolicy.rate,
             settlementType: appliedPolicy.type,
             scaleGroup: appliedPolicy.group.substring(0, 1), 
-            // 🌟 관리자 페이지에서 엑박 안 뜨게 폴더 경로를 붙여서 전송!
+            // 핵심: Nginx가 /images/res/ 경로를 감시하므로 URL도 그에 맞춰 생성
             imageUrl: (images && images.length > 0) 
-                ? (images[0].startsWith('http') ? images[0] : `http://localhost/msa/res/uploads/${images[0]}`) 
+                ? (images[0].startsWith('http') 
+                    ? images[0] 
+                    : `/images/res/${images[0]}`) // 👈 앞에 도메인 싹 빼고 상대 경로만!
                 : null,
             // 🌟 2. [추가] 예매 오픈/종료 시간 & 총 좌석 수 
             bookingStartDate: formatToSpring(open_time || new Date()), // 예매 시작

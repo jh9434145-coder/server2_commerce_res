@@ -12,10 +12,10 @@ const testController = require('../controllers/testController');
 // [파일 저장 설정]
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
-        // 🌟 OS에 상관없이 작동하도록 경로 설정
+        // 핵심 주석: 리눅스(도커) 환경에서는 외부 볼륨과 연결된 컨테이너 내부 경로(/app/public/images/res)를 사용
         const dir = process.platform === 'win32' 
-            ? path.join(process.cwd(), 'uploads') // 윈도우: 프로젝트 루트/uploads
-            : '/home/ubuntu/msa/storage';        // 리눅스: 원래 경로
+            ? path.join(process.cwd(), 'uploads') // 윈도우: 로컬 개발용
+            : (process.env.UPLOAD_DIR || '/app/public/images/res'); // 리눅스(도커): 환경변수 우선, 없으면 기본 볼륨 경로
 
         // 폴더가 없으면 자동으로 만든다
         if (!fs.existsSync(dir)) {
@@ -44,6 +44,11 @@ router.get('/events/my', eventController.getMyEvents);
 // 예: http://localhost:8082/events/:eventId
 router.get('/events/:eventId', eventController.getEventDetail); // 👈 eventController로 변경
 
+// ✅ 위시리스트 (여기에 추가)
+router.get('/wishlist', eventController.getMyWishlist);
+router.post('/events/:eventId/wishlist', eventController.addWishlist);
+router.delete('/events/:eventId/wishlist', eventController.removeWishlist);
+
 // [POST] 유저대시보드 
 router.post('/dashboard/dashboard-queue', eventController.sendDashboardQueues);
 // [GET]📍 공연 정보/지도 관련
@@ -63,6 +68,12 @@ router.get('/reservations/status/:ticketCode', resController.getReservationStatu
 
 // [POST] 사용자 직접 환불 요청
 router.post('/refund', resController.requestRefund);
+
+// [POST] 사용자 직접 환불 요청
+router.post('/refundList', resController.refundList);
+
+// [POST] 어드민 환불 완료 내역 조회
+router.post('/refundCompletedList', resController.refundCompletedList);
 
 // [GET] 특정 유저의 전체 예약 내역 조회 
 // 경로: /msa/res/member/:memberId

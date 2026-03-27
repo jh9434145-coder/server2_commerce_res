@@ -4,6 +4,7 @@ const resService = require('../services/resService');
 const redis = require('../config/redisClient'); 
 const { publishToQueue, ROUTING_KEYS } = require('../config/rabbitMQ');
 const prisma = require('../config/prisma');
+const resRepository = require('../repositories/resRepository');
 
 // =========================================================================
 // [1] 예매 생성 (🚀 예약 도메인의 핵심 로직)
@@ -258,5 +259,71 @@ exports.refundCompletedList = async (req, res) => {
     } catch (error) {
         console.error("Refund Completed List Error:", error);
         res.status(500).json({ success: false, message: "완료 내역 조회 실패" });
+    }
+};
+
+// [유저대시보드] 확정 예매 건수 조회 (getConfirmedReservationCount)
+exports.getConfirmedReservationCount = async (req, res) => {
+    try {
+        // 인증 미들웨어에서 설정된 memberId 사용 (예시)
+        const userId = req.query.userId || req.memberId;
+
+        if (!userId) {
+            return res.status(400).json({ message: "유저 정보가 필요해." });
+        }
+
+        // 서비스/레포지토리에서 개수 조회
+        const count = await resRepository.countConfirmedReservationsByUserId(userId);
+
+        res.status(200).json({
+            success: true,
+            count: count // 예매 건수 숫자만 반환
+        });
+    } catch (err) {
+        console.error("예매 건수 조회 실패:", err);
+        res.status(500).json({ message: "서버 오류 발생" });
+    }
+};
+
+// =========================================================================
+// [관리자 이벤트] 예매가 완료된 좌석 내역 
+// =========================================================================
+// 목적: 프론트엔드 모달에서 '루미나' 전용관 좌석표를 그릴 때, 이미 팔려서 선택 불가한 까만 좌석 배열을 반환.
+exports.getEventReservedSeats = async (req, res) => {
+    try {
+        const eventId = Number(req.params.eventId);
+
+        if (isNaN(eventId)) {
+            return res.status(400).json({ message: "유효하지 않은 이벤트 ID입니다." });
+        }
+
+        // 1. 해당 이벤트의 예매 내역 중 '취소/실패'가 아닌 것들의 좌석 배열만 쏙 빼오기
+        const reservations = await prisma.reservations.findMany({
+            where: {
+                event_id: eventId,
+                // 취소(CANCELLED), 결제실패(FAILED) 등 자리가 다시 풀려야 하는 상태 제외
+                status: { notIn: ['CANCELLED', 'CANCELED', 'FAILED', 'REFUNDED'] } 
+            },
+            select: {
+                selected_seats: true, 
+            },
+        });
+
+        // 2. Json 배열 평탄화 (Flatten)
+        // DB 리턴 형태: [ { selected_seats: ["A1", "A2"] }, { selected_seats: ["C3"] } ]
+        // flatMap 변환 후: ["A1", "A2", "C3"]
+        const reservedSeats = reservations.flatMap(r => 
+            Array.isArray(r.selected_seats) ? r.selected_seats : []
+        );
+
+        res.status(200).json({
+            success: true,
+            eventId,
+            reservedSeats // 🌟 프론트가 기다리는 바로 그 데이터!
+        });
+
+    } catch (error) {
+        console.error("❌ 좌석 조회 오류:", error);
+        res.status(500).json({ message: "좌석 조회 중 오류가 발생했습니다." });
     }
 };

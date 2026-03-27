@@ -44,6 +44,9 @@ router.get('/events/my', eventController.getMyEvents);
 // 예: http://localhost:8082/events/:eventId
 router.get('/events/:eventId', eventController.getEventDetail); // 👈 eventController로 변경
 
+// [GET] 유저아티스트페이지 이벤트 카운트
+router.get('/eventsList', eventController.getEventsList);
+
 // ✅ 위시리스트 (여기에 추가)
 router.get('/wishlist', eventController.getMyWishlist);
 router.post('/events/:eventId/wishlist', eventController.addWishlist);
@@ -51,6 +54,7 @@ router.delete('/events/:eventId/wishlist', eventController.removeWishlist);
 
 // [POST] 유저대시보드 
 router.post('/dashboard/dashboard-queue', eventController.sendDashboardQueues);
+
 // [GET]📍 공연 정보/지도 관련
 router.get('/events/:eventId/location', eventController.getEventLocation);
 
@@ -88,6 +92,11 @@ router.get('/events/:eventId/reservations', resController.getEventReservations);
 // [GET] 아티스트 계정에서 조회되는 본인 이벤트 최근 5일 예매조회
 router.get('/artistreserve/:memberId', resController.getRecentTicketStats);
 
+// [GET] 유저 확정 예매 건수만 조회
+router.get('/dashboard/reservation-count', resController.getConfirmedReservationCount);
+
+// [GET] [관리자 이벤트] 예매가 완료된 좌석 내역 
+router.get('/reserveSeat/:eventId', resController.getEventReservedSeats);
 
 
 // [GET] test
